@@ -1,172 +1,246 @@
 # Bruteforce Bootloader Unlocker
 
-This project provides scripts to attempt unlocking the bootloader of Android devices using Fastboot. It supports both Linux and Windows (PowerShell) environments, featuring configurable code types and persistent device-specific settings to enhance usability and effectiveness.
+Script-only Fastboot helper for authorized bootloader unlock attempts on Android devices. It can send unlock commands, detect common Fastboot unlock flows, and generate candidate unlock codes from prioritized pattern masks.
+
+> **Use only on devices you own or are explicitly authorized to service.** This project does not bypass carrier locks, OEM policy blocks, Factory Reset Protection, or hardware restrictions.
 
 ## Features
 
-- **Cross-Platform Support:** Compatible with Linux and Windows (PowerShell).
-- **Configurable Code Types:** Supports both numeric and alphanumeric unlock codes.
-- **Persistent Settings:** Stores device-specific configurations and the last attempted unlock code, allowing the process to resume seamlessly.
-- **Dynamic Code Generation:** Generates unlock codes based on user-defined character sets and code lengths.
-- **Graceful Exit Handling:** Saves progress automatically upon exit or interruption.
-- **User-Friendly Prompts:** Guides users through initial setup with clear prompts for configuration.
-- **Pre-flight Checks:** Validates that `fastboot` and `adb` are available in PATH before starting.
+- **Fastboot-first device support:** targets devices that expose bootloader unlock over Fastboot or Fastboot-like modes.
+- **Command profile autodetect:** selects common unlock flows when safe to infer:
+  - `fastboot flashing unlock`
+  - `fastboot oem unlock <code>`
+  - manual profiles for other Fastboot variants
+- **Pattern DSL:** express likely code formats such as `X{20}`, `A{19}9`, `9{6}`, `H{32}`.
+- **Priority scheduler:** smart mode weights higher-probability patterns before broader fallbacks.
+- **Persistent resume:** stores device-specific settings and offsets in `<device>.dat`.
+- **Hard safety stops:** exits when no Fastboot device is present or multiple devices are connected.
+- **Clear terminal UI:** shows command profile, pattern schedule, offsets, and progress.
 
 ## Compatibility
 
-> **Important:** This script runs on your **computer** (PC, Mac, or Linux), not on your Android device. It communicates with the device via USB using the standard `fastboot` protocol.
+### Supported targets
 
-### What you need
+This script is intended for Android devices that:
 
-- A **computer** (Windows, Linux, or macOS) with a USB port
-- [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools) installed on your computer (`fastboot` and `adb` in PATH)
-- **Not** a mobile ADB client such as BugJaeger, Termux with ADB, or similar — these cannot run the fastboot unlock commands this script relies on
+1. Have **OEM unlocking enabled** in Developer Options, and
+2. Accept bootloader unlock through Fastboot/Fastboot-like commands.
 
-### Supported devices
+Known Fastboot-style families include Pixel / AOSP-style devices, Motorola devices, OnePlus-style devices, and other OEMs that expose standard Fastboot unlock behavior. Some OEMs require official portals or vendor tools before any Fastboot command will work.
 
-This script works on Android devices that:
-1. Have **OEM Unlocking** enabled in Developer Options, **or**
-2. Require a numeric or alphanumeric unlock code sent via `fastboot flashing unlock` / `fastboot oem unlock`
+### Not supported
 
-## Limitations
-
-> **This script does NOT bypass carrier-level hardware locks.**
-
-If **OEM Unlocking** is **greyed out** in Developer Options, your device bootloader is locked at the carrier or hardware level. In this case:
-- `fastboot flashing unlock` will be rejected by the device
-- This script cannot help, regardless of how many codes it tries
-
-If **OEM Unlocking** is **available and toggleable** in Developer Options, your device supports bootloader unlocking and this script may be useful.
-
-### Motorola devices — try the official path first
-
-Many Motorola devices support official bootloader unlocking. Before using this script:
-
-1. Enable **Developer Options**: Settings → About Phone → tap **Build Number** 7 times
-2. Go to **Settings → Developer Options** and enable **OEM Unlocking**
-3. Visit the [Motorola Bootloader Unlock Portal](https://motorola-global-portal.custhelp.com/app/standalone/bootloader/unlock-your-device-a) to obtain an official unlock code
-4. If the official path is not available, boot into fastboot (`adb reboot bootloader`) and try `fastboot flashing unlock`
-
-Only use this brute-force script if the device uses a numeric/alphanumeric code that you do not have.
+- Carrier-locked devices where OEM unlocking is greyed out
+- Devices blocked by FRP / enterprise policy / OEM policy
+- Vendor unlock tools that do not expose a Fastboot unlock command
+- Mobile ADB clients such as BugJaeger or Termux ADB
+- Windows PowerShell script execution in this repo
 
 ## Requirements
 
-- **For Both Linux and Windows:**
-  - A computer with a USB port.
-  - Fastboot and ADB installed and included in your system's PATH environment variable.
-  - USB debugging enabled on your Android device.
+- Linux or WSL shell with Bash
+- Android SDK Platform Tools (`fastboot` in PATH)
+- USB cable and working USB permissions
+- Device in bootloader/Fastboot mode
+- Legal authorization to unlock the device
 
-- **For Windows:**
-  - PowerShell installed (version 5.0 or higher is recommended).
+`adb` is optional. It is useful for `adb reboot bootloader`, but the unlock loop itself uses Fastboot.
+
+## Windows / WSL setup
+
+This repo no longer ships Windows PowerShell support. Recommended Windows path:
+
+1. Install [Android SDK Platform Tools](https://developer.android.com/tools/releases/platform-tools) on Windows.
+2. Add `platform-tools` to Windows `PATH`.
+3. Install WSL.
+4. From WSL, either ensure `fastboot.exe` is on PATH or set `FASTBOOT_BIN`:
+
+   ```bash
+   fastboot.exe devices
+   FASTBOOT_BIN=fastboot.exe ./bootloader_unlocker
+   ```
+
+If `fastboot` is missing but `fastboot.exe` is on PATH, the script automatically falls back to `fastboot.exe`. Using Windows `fastboot.exe` from WSL often gives more reliable USB device detection than Linux Fastboot inside WSL.
 
 ## Installation
 
-1. **Clone the Repository:**
-   ```bash
-   git clone https://github.com/samuelcaldas/bruteforce-bootloader-unlocker.git
-   cd bruteforce-bootloader-unlocker
-   ```
+```bash
+git clone https://github.com/samuelcaldas/bruteforce-bootloader-unlocker.git
+cd bruteforce-bootloader-unlocker
+chmod +x bootloader_unlocker
+```
 
-2. **Ensure Fastboot and ADB are Installed:**
-   - **Linux:**
-     - Install via your distribution's package manager. For example, on Debian-based systems:
-       ```bash
-       sudo apt-get update
-       sudo apt-get install android-tools-adb android-tools-fastboot
-       ```
-   - **Windows:**
-     - Download the [Android SDK Platform Tools](https://developer.android.com/studio/releases/platform-tools) from the Android developer website.
-     - Extract the downloaded ZIP file.
-     - Add the extracted directory to your system's PATH environment variable:
-       - Press `Win + X` and select **System**.
-       - Click on **Advanced system settings**.
-       - Click **Environment Variables**.
-       - Under **System variables**, find and select **Path**, then click **Edit**.
-       - Click **New** and add the path to the extracted Platform Tools directory.
-       - Click **OK** to save changes.
+Install Fastboot on Debian/Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install android-tools-fastboot
+```
 
 ## Usage
 
-### Linux
+1. Enable Developer Options.
+2. Enable **OEM unlocking**.
+3. Boot device into Fastboot mode:
 
-1. **Connect Your Device:**
-   - Use a USB cable to connect your Android device to your computer.
-   - Ensure that USB debugging is enabled on your device.
-
-2. **Open Terminal and Navigate to the Script's Directory:**
    ```bash
-   cd path/to/bruteforce-bootloader-unlocker
+   adb reboot bootloader
    ```
 
-3. **Make the Script Executable:**
+4. Confirm exactly one device is visible:
+
    ```bash
-   chmod +x bootloader_unlocker
+   fastboot devices
    ```
 
-4. **Run the Script:**
+5. Run:
+
    ```bash
    ./bootloader_unlocker
    ```
 
-5. **Follow the Prompts:**
-   - On the first run for a device, you'll be prompted to specify whether the unlock code is numeric (`n`) or alphanumeric (`a`), and to enter the length of the unlock code.
-   - The script will store these settings in a file named after your device's serial number (e.g., `device123.dat`) for future runs.
+6. Type `AUTHORIZED` when prompted.
 
-6. **Unlock Process:**
-   - The script will attempt different unlock codes based on your configuration.
-   - Progress is displayed in the terminal, and the current state is saved automatically.
-   - If interrupted, you can resume the process by running the script again.
+## Command profiles
 
-### Windows (PowerShell) ALPHA!!!
+Default profile is `auto`.
 
-1. **Connect Your Device:**
-   - Use a USB cable to connect your Android device to your computer.
-   - Ensure that USB debugging is enabled on your device.
+```bash
+./bootloader_unlocker --command auto
+```
 
-2. **Open PowerShell and Navigate to the Script's Directory:**
-   ```powershell
-   cd C:\path\to\bruteforce-bootloader-unlocker
-   ```
+Manual profiles:
 
-3. **Set Execution Policy (If Necessary):**
-   - To allow the script to run, you may need to adjust the execution policy:
-     ```powershell
-     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-     ```
+```bash
+./bootloader_unlocker --command flashing-unlock
+./bootloader_unlocker --command flashing-unlock-code
+./bootloader_unlocker --command oem-unlock-code
+./bootloader_unlocker --command oem-unlock
+./bootloader_unlocker --command oem-unlock-go
+```
 
-4. **Run the Script:**
-   ```powershell
-   .\bootloader_unlocker.ps1
-   ```
+Notes:
 
-5. **Follow the Prompts:**
-   - Similar to the Linux version, you'll be prompted to specify the code type and length on the first run for each device.
-   - Configuration is saved in a device-specific `.dat` file for future executions.
+- `flashing-unlock`, `oem-unlock`, and `oem-unlock-go` do not take candidate codes. Script sends the command once, then the device may ask for confirmation.
+- `oem-unlock-code` and `flashing-unlock-code` use generated codes.
+- Autodetect uses safe probes such as unlock ability, unlock-data response, and product info. It does not fire destructive unlock commands as probes.
 
-6. **Unlock Process:**
-   - The script will attempt different unlock codes based on your configuration.
-   - Progress is displayed in the PowerShell window, and the current state is saved automatically.
-   - If interrupted, you can resume the process by running the script again.
+## Pattern DSL
 
-## Script Configuration and Persistence
+Pattern symbols:
 
-- **Device-Specific Configuration:**
-  - Upon the first run for a device, the script prompts for:
-    - **Code Type:** Whether the unlock codes are numeric or alphanumeric.
-    - **Code Length:** The length of the unlock codes.
-  - These settings are stored in a file named after your device's serial number (e.g., `device123.dat`), ensuring that you don't need to reconfigure settings for the same device in future runs.
-- **Progress Saving:**
-  - The script saves the last attempted unlock code in the configuration file.
-  - This allows the script to resume from where it left off if interrupted.
+| Symbol | Meaning | Charset |
+|---|---|---|
+| `9` | digit | `0-9` |
+| `A` | uppercase letter | `A-Z` |
+| `a` | lowercase letter | `a-z` |
+| `X` | uppercase alphanumeric | `A-Z0-9` |
+| `x` | mixed alphanumeric | `A-Za-z0-9` |
+| `H` | uppercase hex | `0-9A-F` |
+| `h` | lowercase hex | `0-9a-f` |
+| `?` | active charset | selected by `--type` |
+
+Repeats use `{n}`:
+
+```text
+X{20}       # 20 uppercase alphanumeric chars
+A{19}9      # 19 uppercase letters, then digit
+A{4}9A{15}  # 4 uppercase letters, digit, 15 uppercase letters
+9{6}        # 6-digit numeric code
+H{32}       # 32-char uppercase hex token
+```
+
+Other characters are literals, useful for separators:
+
+```text
+XXXX-XXXX
+```
+
+## Built-in priorities
+
+Show built-ins:
+
+```bash
+./bootloader_unlocker --list-patterns
+```
+
+Default smart schedule uses weighted priority:
+
+1. `motorola-portal-20` — `X{20}`
+2. `motorola-last-digit` — `A{19}9`
+3. `motorola-pos5-digit` — `A{4}9A{15}`
+4. `hex-16` — `H{16}`
+5. `hex-32` — `H{32}`
+6. `numeric-8` — `9{8}`
+7. `numeric-6` — `9{6}`
+
+Custom single pattern:
+
+```bash
+./bootloader_unlocker --pattern 'X{20}' --command oem-unlock-code
+```
+
+Custom weighted schedule:
+
+```bash
+./bootloader_unlocker --patterns 'moto:X{20}:10;pin6:9{6}:1' --strategy smart
+```
+
+## Persistence
+
+State is saved in a sanitized per-device file:
+
+```text
+<device>.dat
+```
+
+Saved data includes:
+
+- command profile
+- code type
+- strategy
+- pattern list
+- global attempt cursor
+- per-pattern offsets
+- known positions
+
+Successful code is written to:
+
+```text
+SUCCESS_<device>.txt
+```
+
+## Common official flows
+
+- AOSP / modern Android: `fastboot flashing unlock`
+- Older devices: often `fastboot oem unlock`
+- Critical partitions may use `fastboot flashing unlock_critical`
+- Motorola often requires official unlock-data portal flow before `fastboot oem unlock <UNIQUE_KEY>`
+- Xiaomi often requires Xiaomi account/device pairing and Xiaomi unlock tooling before Fastboot unlock succeeds
+
+## Limitations
+
+- No Windows PowerShell implementation
+- No tests or CI; manual verification only
+- No carrier-lock bypass
+- No FRP / enterprise-policy bypass
+- No vendor portal automation
+- No guarantee against device lockout after repeated attempts
 
 ## Disclaimer
 
-**This script is experimental and for educational purposes only. Use it at your own risk. The author is not responsible for any damage or data loss that may occur as a result of using this script.**
+This script is experimental and for educational, repair, recovery, and authorized device-administration use only. Unlocking a bootloader may erase user data and can void warranty or reduce device security. Unauthorized access to devices may be illegal.
 
-**Legal and Ethical Considerations:**
-- Ensure you have the legal right and permission to unlock the device.
-- Unauthorized access to devices may be illegal and unethical.
-- Repeated failed attempts to unlock a device may trigger security measures or permanently lock the device.
+## Sources
+
+- [AOSP: Lock and unlock the bootloader](https://source.android.com/docs/core/architecture/bootloader/locking_unlocking)
+- [AOSP: Flash with Fastboot](https://source.android.com/docs/setup/test/running)
+- [Google Pixel Help: enter Fastboot mode](https://support.google.com/pixelphone/answer/16493042)
+- [Motorola Support: bootloader unlock program compatibility](https://en-us.support.motorola.com/app/answers/detail/a_id/89973/~/what-devices-are-compatible-with-the-bootloader-unlock-program)
+- [Motorola Support: Factory Reset Protection / OEM unlocking](https://en-us.support.motorola.com/app/answers/detail/a_id/104893/~/factory-reset-protection)
+- [Motorola Bootloader Legal Agreement PDF](https://en-us.support.motorola.com/euf/assets/docs/Bootloader-Legal_Agreement_and_Warning.pdf)
+- [Xiaomi Support: unlock bootloader FAQ](https://www.mi.com/uk/support/faq/details/KA-07238/)
+- [Xiaomi Support: bootloader unlock process](https://www.mi.com/global/support/faq/details/KA-533394)
 
 ## License
 
@@ -174,8 +248,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Contributing
 
-Contributions are welcome! Please fork the repository and submit a pull request with your enhancements or bug fixes.
+Contributions welcome. Keep changes script-only unless project scope changes.
 
 ## Support
 
-If you encounter any issues or have questions, feel free to open an issue on the [GitHub repository](https://github.com/samuelcaldas/bruteforce-bootloader-unlocker/issues).
+Open an issue on the [GitHub repository](https://github.com/samuelcaldas/bruteforce-bootloader-unlocker/issues).

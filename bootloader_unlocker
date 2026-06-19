@@ -1,116 +1,175 @@
 #!/bin/bash
 clear
 
-# ---------------- PRE-FLIGHT CHECKS ----------------
-# Verify required tools are available in PATH before proceeding
+# ---------------- TERMINAL UI ----------------
+if [[ -t 1 && -z "${NO_COLOR}" ]]; then
+  BOLD='\033[1m'
+  DIM='\033[2m'
+  RED='\033[31m'
+  GREEN='\033[32m'
+  YELLOW='\033[33m'
+  BLUE='\033[34m'
+  CYAN='\033[36m'
+  RESET='\033[0m'
+else
+  BOLD=''
+  DIM=''
+  RED=''
+  GREEN=''
+  YELLOW=''
+  BLUE=''
+  CYAN=''
+  RESET=''
+fi
 
-function check_dependencies {
-  local missing=()
+function banner {
+  echo -e "${CYAN}${BOLD}FASTBOOT UNLOCK CONSOLE${RESET}"
+  echo -e "${DIM}scope: authorized devices only | transport: fastboot | mode: pattern search${RESET}"
+  echo "------------------------------------------------------------"
+}
 
-  if ! command -v fastboot &>/dev/null; then
-    missing+=("fastboot")
-  fi
-
-  if ! command -v adb &>/dev/null; then
-    missing+=("adb")
-  fi
-
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "============================================================"
-    echo " ERROR: Missing required tools: ${missing[*]}"
-    echo "============================================================"
-    echo ""
-    echo " These tools must be installed and available in your PATH."
-    echo ""
-    echo " Install instructions:"
-    echo "   Linux (Debian/Ubuntu):"
-    echo "     sudo apt-get install android-tools-adb android-tools-fastboot"
-    echo ""
-    echo "   Windows / Other:"
-    echo "     Download Android SDK Platform Tools:"
-    echo "     https://developer.android.com/tools/releases/platform-tools"
-    echo "     Extract and add to your system PATH."
-    echo ""
-    echo " NOTE: Mobile ADB clients (BugJaeger, Termux, etc.) are NOT"
-    echo "       supported. This script must run on a PC/Mac/Linux computer."
-    echo "============================================================"
-    exit 1
-  fi
-
-  # Verify fastboot version (informational)
-  local fb_version
-  fb_version=$(fastboot --version 2>/dev/null | head -1)
-  echo "[OK] fastboot found: ${fb_version:-unknown version}"
-  echo "[OK] adb found: $(adb --version 2>/dev/null | head -1)"
+function section {
   echo ""
+  echo -e "${BLUE}${BOLD}[$1]${RESET} $2"
 }
 
-# Check if a device is connected in fastboot mode
-function check_device_connected {
-  local devices
-  devices=$(fastboot devices 2>/dev/null)
-  if [[ -z "${devices}" ]]; then
-    echo "============================================================"
-    echo " WARNING: No device detected in fastboot mode."
-    echo "============================================================"
-    echo " Make sure your device is:"
-    echo "   1. Connected via USB"
-    echo "   2. In fastboot/bootloader mode (adb reboot bootloader)"
-    echo "   3. USB debugging is enabled"
-    echo ""
-    echo " If OEM Unlock is greyed out in Developer Options, your"
-    echo " device may have a carrier lock. This script cannot bypass"
-    echo " carrier-level hardware locks."
-    echo "============================================================"
-    read -rp "Continue anyway? [y/N]: " confirm
-    if [[ ! "${confirm,,}" == "y" ]]; then
-      echo "Aborted."
-      exit 0
-    fi
-  else
-    echo "[OK] Device detected in fastboot mode:"
-    echo "     ${devices}"
-    echo ""
-  fi
-}
-
+function ok { echo -e "${GREEN}[OK]${RESET} $1"; }
+function warn { echo -e "${YELLOW}[WARN]${RESET} $1"; }
+function fail { echo -e "${RED}[ERR]${RESET} $1"; }
 
 # ---------------- CONFIGURATION ----------------
-# Default values for Motorola devices
 DEFAULT_CODE_LENGTH=20
-DEFAULT_CHARACTER_SET="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-DEFAULT_STRATEGY="sequential"
-# Custom patterns observed in Motorola codes
-MOTO_PATTERN_1="[A-Z]{19}[0-9]"    # 19 uppercase letters followed by 1 number
-MOTO_PATTERN_2="[A-Z]{4}[0-9][A-Z]{15}" # 4 uppercase letters, 1 number, 15 uppercase letters
+DEFAULT_STRATEGY="smart"
+DEFAULT_COMMAND_PROFILE="auto"
+FASTBOOT_BIN=${FASTBOOT_BIN:-fastboot}
+MAX_INT=9223372036854775807
 
-# ---------------- FUNCTIONS ----------------
-# Function to show help
+DIGITS='0123456789'
+UPPER='ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+LOWER='abcdefghijklmnopqrstuvwxyz'
+UPPER_ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+MIXED_ALNUM='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+HEX_UPPER='0123456789ABCDEF'
+HEX_LOWER='0123456789abcdef'
+
+# Weighted from most useful / most commonly reported fastboot-like flows to broader guesses.
+# Format: name:mask:weight:note
+BUILTIN_PATTERNS="motorola-portal-20:X{20}:10:Motorola portal unlock keys are commonly reported as 20 uppercase alphanumeric chars;motorola-last-digit:A{19}9:6:Observed Motorola-like 20-char key with final digit;motorola-pos5-digit:A{4}9A{15}:5:Observed Motorola-like 20-char key with digit at position 5;hex-16:H{16}:3:Common token/key style;hex-32:H{32}:2:Long hex token/key style;numeric-8:9{8}:2:Short numeric service-code style;numeric-6:9{6}:1:Short numeric fallback"
+
+# ---------------- HELP ----------------
 function show_help {
-  echo "Bootloader Unlocker - Optimized for Motorola Devices"
-  echo "Usage: $0 [options]"
-  echo ""
-  echo "Options:"
-  echo "  -h, --help            Show this help message"
-  echo "  -d, --device <id>     Specify device ID (default: auto-detect)"
-  echo "  -t, --type <type>     Code type: numeric, alpha, moto (default: moto)"
-  echo "  -l, --length <num>    Code length (default: 20 for Motorola)"
-  echo "  -s, --start <code>    Start from specific code"
-  echo "  -p, --pattern <num>   Use specific Motorola pattern (1 or 2)"
-  echo "  --strategy <strategy> Bruteforce strategy: sequential, random, smart (default: sequential)"
-  echo ""
-  echo "Motorola-specific features:"
-  echo "  - Default 20-character codes"
-  echo "  - Optimized character set (mostly uppercase letters and numbers)"
-  echo "  - Pattern-specific brute forcing based on observed Motorola codes"
-  echo ""
-  echo "Example: $0 --type moto --pattern 1"
+  cat <<EOF
+Bootloader Unlocker - fastboot command profiles + pattern DSL
+
+Usage: $0 [options]
+
+Options:
+  -h, --help                 Show this help message
+  -d, --device <id>          Specify fastboot device ID (default: auto-detect)
+  -t, --type <type>          Code type: numeric, alpha, moto (legacy shortcut)
+  -l, --length <num>         Code length for legacy generic search
+  -s, --start <value>        Start from numeric offset
+  -p, --pattern <mask>       Use one DSL mask, e.g. 'X{20}', 'A{19}9', '999999'
+  --patterns <list>          Semicolon list: name:mask:weight;name:mask:weight
+  --strategy <strategy>      sequential, random, smart (default: smart)
+  --command <profile>        auto, flashing-unlock, flashing-unlock-code,
+                             oem-unlock-code, oem-unlock, oem-unlock-go
+  --list-patterns            Show built-in pattern DSL masks
+
+Pattern DSL:
+  9  digit              0-9
+  A  uppercase letter   A-Z
+  a  lowercase letter   a-z
+  X  uppercase alnum    A-Z0-9
+  x  mixed alnum        A-Za-z0-9
+  H  uppercase hex      0-9A-F
+  h  lowercase hex      0-9a-f
+  ?  active charset     selected by --type
+  {n} repeats previous token, e.g. A{4}9A{15}
+  Other chars are literals, useful for separators like XXXX-XXXX
+
+Examples:
+  $0 --command auto --strategy smart
+  $0 --pattern 'X{20}' --command oem-unlock-code
+  $0 --patterns 'moto:X{20}:10;pin6:9{6}:1'
+EOF
   exit 0
 }
 
-# Function to read device data from the file
+function list_patterns {
+  echo "Built-in patterns, highest priority first:"
+  IFS=';' read -ra entries <<< "${BUILTIN_PATTERNS}"
+  for entry in "${entries[@]}"; do
+    IFS=':' read -r name mask weight note <<< "${entry}"
+    printf "  %-22s mask=%-12s weight=%s  %s\n" "${name}" "${mask}" "${weight}" "${note}"
+  done
+  exit 0
+}
+
+# ---------------- PRE-FLIGHT CHECKS ----------------
+function check_dependencies {
+  if ! command -v "${FASTBOOT_BIN}" >/dev/null 2>&1; then
+    if [[ "${FASTBOOT_BIN}" == "fastboot" ]] && command -v fastboot.exe >/dev/null 2>&1; then
+      FASTBOOT_BIN="fastboot.exe"
+    else
+      fail "fastboot not found in PATH. Install Android SDK Platform Tools."
+      echo "Linux: sudo apt-get install android-tools-fastboot"
+      echo "Windows + WSL: add platform-tools to Windows PATH, or set FASTBOOT_BIN=/path/to/fastboot.exe."
+      exit 1
+    fi
+  fi
+
+  local fb_version
+  fb_version=$("${FASTBOOT_BIN}" --version 2>/dev/null | sed -n '1p')
+  ok "fastboot found (${FASTBOOT_BIN}): ${fb_version:-unknown version}"
+
+  if command -v adb >/dev/null 2>&1; then
+    ok "adb found: $(adb --version 2>/dev/null | sed -n '1p')"
+  else
+    warn "adb not found. Not required for brute-force loop; useful for 'adb reboot bootloader'."
+  fi
+}
+
+function detect_device {
+  local lines count first
+
+  if [[ -n "${manual_device}" ]]; then
+    device="${manual_device}"
+  else
+    lines=$("${FASTBOOT_BIN}" devices 2>/dev/null | awk 'NF >= 2 {print $1}')
+    count=$(printf "%s\n" "${lines}" | grep -c .)
+    first=$(printf "%s\n" "${lines}" | sed -n '1p')
+
+    if [[ "${count}" -eq 0 ]]; then
+      fail "No device detected in fastboot mode. Hard stop."
+      echo "Put device in bootloader/fastboot mode, then re-run."
+      echo "Common path: enable OEM unlocking, connect USB, run 'adb reboot bootloader'."
+      exit 1
+    fi
+
+    if [[ "${count}" -gt 1 ]]; then
+      fail "Multiple "${FASTBOOT_BIN}" devices detected. Pass --device <id>."
+      "${FASTBOOT_BIN}" devices
+      exit 1
+    fi
+
+    device="${first}"
+  fi
+
+  if ! "${FASTBOOT_BIN}" -s "${device}" devices 2>/dev/null | awk '{print $1}' | grep -Fxq "${device}"; then
+    fail "Device '${device}' not present in fastboot output."
+    exit 1
+  fi
+
+  safe_device=$(printf "%s" "${device}" | tr -c 'A-Za-z0-9._-' '_')
+  devfile="./${safe_device}.dat"
+  success_file="./SUCCESS_${safe_device}.txt"
+  ok "Device: ${device}"
+}
+
+# ---------------- DEVICE DATA ----------------
 function read_devfile {
-  declare -g code_type code_length last_value charset strategy known_positions
+  declare -g code_type code_length last_value charset strategy known_positions command_profile patterns pattern_offsets resolved_command
   if [[ -f "${devfile}" ]]; then
     while IFS='=' read -r key value; do
       case "${key}" in
@@ -120,12 +179,15 @@ function read_devfile {
         charset) charset="${value}" ;;
         strategy) strategy="${value}" ;;
         known_positions) known_positions="${value}" ;;
+        command_profile) command_profile="${value}" ;;
+        patterns) patterns="${value}" ;;
+        pattern_offsets) pattern_offsets="${value}" ;;
+        resolved_command) resolved_command="${value}" ;;
       esac
     done < "${devfile}"
   fi
 }
 
-# Function to write device data to the file
 function write_devfile {
   {
     echo "code_type=${code_type}"
@@ -134,133 +196,444 @@ function write_devfile {
     echo "charset=${charset}"
     echo "strategy=${strategy}"
     echo "known_positions=${known_positions}"
+    echo "command_profile=${command_profile}"
+    echo "patterns=${patterns}"
+    echo "pattern_offsets=${pattern_offsets}"
+    echo "resolved_command=${resolved_command}"
   } > "${devfile}"
 }
 
-# Function to convert a number to a code string based on the character set
-function number_to_code {
-  local num=$1
-  local length=$2
-  local base=${#charset}
-  local code=''
-  while [[ ${#code} -lt ${length} ]]; do
-    local index=$(( num % base ))
-    code="${charset:index:1}${code}"
-    num=$(( num / base ))
+# ---------------- PATTERN DSL ----------------
+function repeat_char {
+  local ch=$1 count=$2 out="" i
+  for (( i=0; i<count; i++ )); do
+    out="${out}${ch}"
   done
-  
-  # Apply pattern modifications if using a Motorola pattern
-  if [[ "${code_type}" == "moto" && -n "${moto_pattern}" ]]; then
-    local modified_code="${code}"
-    case "${moto_pattern}" in
-      1)
-        # Pattern 1: Ensure last character is a digit, rest are uppercase
-        if [[ ! "${modified_code:19:1}" =~ [0-9] ]]; then
-          # Replace last character with a random digit
-          local digit="${numeric_charset:$(( RANDOM % 10 )):1}"
-          modified_code="${modified_code:0:19}${digit}"
-        fi
-        ;;
-      2)
-        # Pattern 2: 4 uppercase letters, 1 number, 15 uppercase letters
-        if [[ ! "${modified_code:4:1}" =~ [0-9] ]]; then
-          # Replace 5th character with a random digit
-          local digit="${numeric_charset:$(( RANDOM % 10 )):1}"
-          modified_code="${modified_code:0:4}${digit}${modified_code:5}"
-        fi
-        ;;
-    esac
-    code="${modified_code:0:${length}}"
+  printf "%s" "${out}"
+}
+
+function expand_pattern {
+  local pattern=$1 out="" i=0 ch count j num
+
+  while (( i < ${#pattern} )); do
+    ch="${pattern:i:1}"
+    count=1
+
+    if [[ "${pattern:i+1:1}" == "{" ]]; then
+      j=$((i + 2))
+      num=""
+      while (( j < ${#pattern} )) && [[ "${pattern:j:1}" != "}" ]]; do
+        num="${num}${pattern:j:1}"
+        ((j++))
+      done
+      if [[ "${pattern:j:1}" == "}" && "${num}" =~ ^[0-9]+$ && "${num}" -gt 0 ]]; then
+        count="${num}"
+        i="${j}"
+      fi
+    fi
+
+    out="${out}$(repeat_char "${ch}" "${count}")"
+    ((i++))
+  done
+
+  printf "%s" "${out}"
+}
+
+function charset_for_symbol {
+  local symbol=$1
+  case "${symbol}" in
+    9) printf "%s" "${DIGITS}" ;;
+    A) printf "%s" "${UPPER}" ;;
+    a) printf "%s" "${LOWER}" ;;
+    X) printf "%s" "${UPPER_ALNUM}" ;;
+    x) printf "%s" "${MIXED_ALNUM}" ;;
+    H) printf "%s" "${HEX_UPPER}" ;;
+    h) printf "%s" "${HEX_LOWER}" ;;
+    \?) printf "%s" "${charset}" ;;
+    *) printf "%s" "${symbol}" ;;
+  esac
+}
+
+function validate_pattern {
+  local mask=$1 expanded
+  expanded=$(expand_pattern "${mask}")
+  if [[ -z "${expanded}" ]]; then
+    return 1
   fi
-  
-  # Apply any known positions
+  return 0
+}
+
+function pattern_space {
+  local mask=$1 expanded i symbol cs base total=1
+  expanded=$(expand_pattern "${mask}")
+
+  for (( i=0; i<${#expanded}; i++ )); do
+    symbol="${expanded:i:1}"
+    cs=$(charset_for_symbol "${symbol}")
+    base=${#cs}
+    if (( total > MAX_INT / base )); then
+      echo "huge"
+      return
+    fi
+    total=$(( total * base ))
+  done
+
+  echo "${total}"
+}
+
+function pattern_to_code {
+  local offset=$1 mask=$2 expanded result="" i symbol cs base index ch
+  expanded=$(expand_pattern "${mask}")
+
+  for (( i=${#expanded}-1; i>=0; i-- )); do
+    symbol="${expanded:i:1}"
+    cs=$(charset_for_symbol "${symbol}")
+    base=${#cs}
+    if (( base <= 1 )); then
+      ch="${cs}"
+    else
+      index=$(( offset % base ))
+      ch="${cs:index:1}"
+      offset=$(( offset / base ))
+    fi
+    result="${ch}${result}"
+  done
+
+  apply_known_positions "${result}"
+}
+
+function apply_known_positions {
+  local code=$1 temp_code pos char
+  temp_code="${code}"
+
   if [[ -n "${known_positions}" ]]; then
-    local temp_code="${code}"
     while IFS=':' read -r pos char; do
-      if [[ -n "${pos}" && -n "${char}" ]]; then
+      if [[ "${pos}" =~ ^[0-9]+$ && -n "${char}" && ${#char} -eq 1 && "${pos}" -lt ${#temp_code} ]]; then
         temp_code="${temp_code:0:${pos}}${char}${temp_code:$((pos+1))}"
       fi
     done <<< "${known_positions//;/$'\n'}"
-    code="${temp_code}"
   fi
-  
-  echo "${code}"
+
+  echo "${temp_code}"
 }
 
-# Function to generate a random code
-function generate_random_code {
-  local length=$1
-  local code=""
-  local base=${#charset}
-  
-  for (( i=0; i<length; i++ )); do
-    local index=$(( RANDOM % base ))
-    code="${code}${charset:index:1}"
+function split_patterns {
+  IFS=';' read -ra pattern_entries <<< "${patterns}"
+}
+
+function ensure_pattern_offsets {
+  split_patterns
+  IFS=',' read -ra offsets <<< "${pattern_offsets}"
+  local changed=0 i
+
+  for (( i=0; i<${#pattern_entries[@]}; i++ )); do
+    if [[ -z "${offsets[$i]}" || ! "${offsets[$i]}" =~ ^[0-9]+$ ]]; then
+      offsets[$i]=0
+      changed=1
+    fi
   done
-  
-  echo "${code}"
+
+  if (( changed )) || [[ -z "${pattern_offsets}" ]]; then
+    join_pattern_offsets
+  fi
 }
 
-# Function to generate the next code based on strategy
-function next_code {
+function join_pattern_offsets {
+  local out="" i
+  for (( i=0; i<${#pattern_entries[@]}; i++ )); do
+    if [[ $i -gt 0 ]]; then out="${out},"; fi
+    out="${out}${offsets[$i]:-0}"
+  done
+  pattern_offsets="${out}"
+}
+
+function pattern_weight_total {
+  local total=0 entry name mask weight note
+  split_patterns
+  for entry in "${pattern_entries[@]}"; do
+    IFS=':' read -r name mask weight note <<< "${entry}"
+    if [[ ! "${weight}" =~ ^[0-9]+$ || "${weight}" -le 0 ]]; then weight=1; fi
+    total=$((total + weight))
+  done
+  echo "${total}"
+}
+
+function weighted_pattern_index {
+  local cursor=$1 total slot cumulative=0 i entry name mask weight note
+  total=$(pattern_weight_total)
+  if [[ "${total}" -le 0 ]]; then echo 0; return; fi
+  slot=$(( cursor % total ))
+
+  split_patterns
+  for (( i=0; i<${#pattern_entries[@]}; i++ )); do
+    IFS=':' read -r name mask weight note <<< "${pattern_entries[$i]}"
+    if [[ ! "${weight}" =~ ^[0-9]+$ || "${weight}" -le 0 ]]; then weight=1; fi
+    cumulative=$(( cumulative + weight ))
+    if (( slot < cumulative )); then
+      echo "${i}"
+      return
+    fi
+  done
+
+  echo 0
+}
+
+function random_pattern_index {
+  local total slot cumulative=0 i entry name mask weight note
+  total=$(pattern_weight_total)
+  if [[ "${total}" -le 0 ]]; then echo 0; return; fi
+  slot=$(( RANDOM % total ))
+
+  split_patterns
+  for (( i=0; i<${#pattern_entries[@]}; i++ )); do
+    IFS=':' read -r name mask weight note <<< "${pattern_entries[$i]}"
+    if [[ ! "${weight}" =~ ^[0-9]+$ || "${weight}" -le 0 ]]; then weight=1; fi
+    cumulative=$(( cumulative + weight ))
+    if (( slot < cumulative )); then
+      echo "${i}"
+      return
+    fi
+  done
+
+  echo 0
+}
+
+function next_pattern_code {
+  local idx entry name mask weight note offset space
+  ensure_pattern_offsets
+
   case "${strategy}" in
     random)
-      code=$(generate_random_code ${code_length})
+      idx=$(random_pattern_index)
       ;;
-    smart)
-      # Example of a smarter algorithm for Motorola codes
-      # For demonstration, we'll alternate between sequential and pattern-based
-      if (( last_value % 2 == 0 )); then
-        code=$(number_to_code ${last_value} ${code_length})
-      else
-        # Generate a code following Motorola patterns
-        local base_code=$(number_to_code ${last_value} ${code_length})
-        if [[ "${moto_pattern}" == "1" ]]; then
-          # Ensure last character is a digit
-          local digit="${numeric_charset:$(( RANDOM % 10 )):1}"
-          code="${base_code:0:19}${digit}"
-        elif [[ "${moto_pattern}" == "2" ]]; then
-          # 4 uppercase letters, 1 number, 15 uppercase letters
-          local digit="${numeric_charset:$(( RANDOM % 10 )):1}"
-          code="${base_code:0:4}${digit}${base_code:5:15}"
-        else
-          code="${base_code}"
-        fi
-      fi
+    sequential)
+      idx=0
       ;;
     *)
-      # Default: sequential
-      code=$(number_to_code ${last_value} ${code_length})
+      idx=$(weighted_pattern_index "${last_value}")
       ;;
   esac
-  echo "${code}"
+
+  entry="${pattern_entries[$idx]}"
+  IFS=':' read -r name mask weight note <<< "${entry}"
+  offset="${offsets[$idx]:-0}"
+  space=$(pattern_space "${mask}")
+
+  if [[ "${space}" != "huge" && "${space}" -gt 0 && "${offset}" -ge "${space}" ]]; then
+    offsets[$idx]=0
+    offset=0
+  fi
+
+  selected_pattern_index="${idx}"
+  selected_pattern_name="${name}"
+  selected_pattern_mask="${mask}"
+  selected_pattern_space="${space}"
+  selected_pattern_offset="${offset}"
+
+  pattern_to_code "${offset}" "${mask}"
 }
 
-# Function to estimate remaining time
+function advance_pattern_offset {
+  if [[ -n "${selected_pattern_index}" ]]; then
+    offsets[$selected_pattern_index]=$(( ${offsets[$selected_pattern_index]:-0} + 1 ))
+    join_pattern_offsets
+  fi
+}
+
+# ---------------- LEGACY GENERATORS ----------------
+function number_to_code {
+  local num=$1 length=$2 base=${#charset} code='' index
+  while [[ ${#code} -lt ${length} ]]; do
+    index=$(( num % base ))
+    code="${charset:index:1}${code}"
+    num=$(( num / base ))
+  done
+  apply_known_positions "${code}"
+}
+
+function generate_random_code {
+  local length=$1 code="" base=${#charset} i index
+  for (( i=0; i<length; i++ )); do
+    index=$(( RANDOM % base ))
+    code="${code}${charset:index:1}"
+  done
+  apply_known_positions "${code}"
+}
+
+function next_code {
+  if [[ -n "${patterns}" ]]; then
+    next_pattern_code
+    return
+  fi
+
+  selected_pattern_name="generic"
+  selected_pattern_mask="${code_type}:${code_length}"
+  case "${strategy}" in
+    random) generate_random_code "${code_length}" ;;
+    *) number_to_code "${last_value}" "${code_length}" ;;
+  esac
+}
+
+# ---------------- COMMAND PROFILE DETECTION ----------------
+function fastboot_device {
+  "${FASTBOOT_BIN}" -s "${device}" "$@"
+}
+
+function command_needs_code {
+  case "${resolved_command}" in
+    flashing-unlock|oem-unlock|oem-unlock-go) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+function command_label {
+  case "${resolved_command}" in
+    flashing-unlock) echo "fastboot flashing unlock" ;;
+    flashing-unlock-code) echo "fastboot flashing unlock <code>" ;;
+    oem-unlock-code) echo "fastboot oem unlock <code>" ;;
+    oem-unlock) echo "fastboot oem unlock" ;;
+    oem-unlock-go) echo "fastboot oem unlock-go" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+function detect_unlock_command {
+  local requested=$1 ability unlock_data product
+
+  case "${requested}" in
+    flashing-unlock|flashing-unlock-code|oem-unlock-code|oem-unlock|oem-unlock-go)
+      resolved_command="${requested}"
+      ok "Command profile: $(command_label) (manual)"
+      return
+      ;;
+    auto|"") ;;
+    *)
+      fail "Invalid command profile: ${requested}"
+      exit 1
+      ;;
+  esac
+
+  section "PROFILE" "autodetecting safe fastboot unlock flow"
+
+  ability=$(fastboot_device flashing get_unlock_ability 2>&1 || true)
+  if echo "${ability}" | grep -Eq '(^|[^0-9])1([^0-9]|$)'; then
+    resolved_command="flashing-unlock"
+    ok "AOSP unlock ability = 1. Selected: $(command_label)"
+    return
+  fi
+
+  unlock_data=$(fastboot_device oem get_unlock_data 2>&1 || true)
+  if echo "${unlock_data}" | grep -Eiq 'unlock data|bootloader|INFO|Motorola|token'; then
+    if ! echo "${unlock_data}" | grep -Eiq 'unknown command|not supported|FAILED|remote failure'; then
+      resolved_command="oem-unlock-code"
+      ok "OEM unlock-data command responded. Selected: $(command_label)"
+      return
+    fi
+  fi
+
+  product=$(fastboot_device getvar product 2>&1 || true)
+  if echo "${product}" | grep -Eiq 'pixel|google'; then
+    resolved_command="flashing-unlock"
+    ok "Google/Pixel-like product. Selected: $(command_label)"
+    return
+  fi
+
+  resolved_command="oem-unlock-code"
+  warn "Could not prove no-code AOSP unlock support. Selected conservative code flow: $(command_label)"
+}
+
+function run_unlock_command {
+  local code=$1
+  case "${resolved_command}" in
+    flashing-unlock)
+      fastboot_device flashing unlock 2>&1
+      ;;
+    flashing-unlock-code)
+      fastboot_device flashing unlock "${code}" 2>&1
+      ;;
+    oem-unlock-code)
+      fastboot_device oem unlock "${code}" 2>&1
+      ;;
+    oem-unlock)
+      fastboot_device oem unlock 2>&1
+      ;;
+    oem-unlock-go)
+      fastboot_device oem unlock-go 2>&1
+      ;;
+    *)
+      echo "Invalid command profile: ${resolved_command}"
+      return 2
+      ;;
+  esac
+}
+
+function is_terminal_fastboot_error {
+  echo "$1" | grep -Eiq 'unknown command|not supported|not allowed|unlock ability is 0|unlock_ability.*0|oem unlock is not allowed|flashing unlock is not allowed|permission denied|device is locked by carrier|carrier|frp|not unlockable'
+}
+
+function is_fastboot_failure {
+  echo "$1" | grep -Eiq 'fail|failed|failure|error|invalid|denied|wrong|incorrect|not match|mismatch|remote:'
+}
+
+function try_unlock {
+  local code=$1 status
+  output=$(run_unlock_command "${code}")
+  status=$?
+
+  if is_terminal_fastboot_error "${output}"; then
+    echo "${output}"
+    return 2
+  fi
+
+  if [[ ${status} -eq 0 ]] && ! is_fastboot_failure "${output}"; then
+    return 0
+  fi
+
+  return 1
+}
+
+# ---------------- PROGRESS ----------------
+function safe_total_combinations {
+  local base=$1 length=$2 total=1 i
+  for (( i=0; i<length; i++ )); do
+    if (( total > MAX_INT / base )); then
+      echo "huge"
+      return
+    fi
+    total=$(( total * base ))
+  done
+  echo "${total}"
+}
+
+function percent_x1000 {
+  local current=$1 total=$2
+  if [[ "${total}" == "huge" || "${total}" -le 0 ]]; then
+    echo "n/a"
+    return
+  fi
+  printf "%d.%03d" $(( current * 100 / total )) $(( current * 100000 / total % 1000 ))
+}
+
 function estimate_time {
-  local current=$1
-  local total=$2
-  local elapsed=$3
-  
-  if [[ ${current} -le 0 ]]; then
+  local current=$1 total=$2 elapsed=$3 rate remaining days hours minutes seconds
+
+  if [[ "${total}" == "huge" || ${current} -le 0 || ${elapsed} -le 0 ]]; then
     echo "Unknown"
     return
   fi
-  
-  local rate=$(( current / elapsed ))
+
+  rate=$(( current / elapsed ))
   if [[ ${rate} -le 0 ]]; then
     echo "Unknown"
     return
   fi
-  
-  local remaining=$(( (total - current) / rate ))
-  
-  # Format the time
-  local days=$(( remaining / 86400 ))
-  local hours=$(( (remaining % 86400) / 3600 ))
-  local minutes=$(( (remaining % 3600) / 60 ))
-  local seconds=$(( remaining % 60 ))
-  
+
+  remaining=$(( (total - current) / rate ))
+  days=$(( remaining / 86400 ))
+  hours=$(( (remaining % 86400) / 3600 ))
+  minutes=$(( (remaining % 3600) / 60 ))
+  seconds=$(( remaining % 60 ))
+
   if [[ ${days} -gt 0 ]]; then
     echo "${days}d ${hours}h ${minutes}m ${seconds}s"
   elif [[ ${hours} -gt 0 ]]; then
@@ -272,281 +645,191 @@ function estimate_time {
   fi
 }
 
-# Function to try unlocking with the given code
-function try_unlock {
-  local code=$1
-  
-  # Try to unlock the device
-  output=$(fastboot oem unlock "${code}" 2>&1)
-  
-  # Check if the unlock was successful
-  if ! echo "${output}" | grep -iqE 'fail(ed|ure)?'; then
-    return 0  # Success
-  else
-    return 1  # Failure
-  fi
-}
-
-# Function to display progress bar
-function show_progress {
-  local current=$1
-  local total=$2
-  local length=50
-  local filled=$(( current * length / total ))
-  
-  printf "["
-  for (( i=0; i<length; i++ )); do
-    if [[ ${i} -lt ${filled} ]]; then
-      printf "#"
-    else
-      printf " "
-    fi
-  done
-  printf "] %d/%d (%0.2f%%)" ${current} ${total} $(bc -l <<< "scale=2; ${current}*100/${total}")
-}
-
-# ---------------- PARSE COMMAND LINE ARGUMENTS ----------------
-# Parse command line arguments
+# ---------------- ARGUMENTS ----------------
 while [[ $# -gt 0 ]]; do
   key="$1"
-  case $key in
-    -h|--help)
-      show_help
-      ;;
-    -d|--device)
-      manual_device="$2"
-      shift 2
-      ;;
-    -t|--type)
-      arg_code_type="$2"
-      shift 2
-      ;;
-    -l|--length)
-      arg_code_length="$2"
-      shift 2
-      ;;
-    -s|--start)
-      arg_start_code="$2"
-      shift 2
-      ;;
-    -p|--pattern)
-      arg_moto_pattern="$2"
-      shift 2
-      ;;
-    --strategy)
-      arg_strategy="$2"
-      shift 2
-      ;;
-    *)
-      echo "Unknown option: $1"
-      show_help
-      ;;
+  case ${key} in
+    -h|--help) show_help ;;
+    --list-patterns) list_patterns ;;
+    -d|--device) manual_device="$2"; shift 2 ;;
+    -t|--type) arg_code_type="$2"; shift 2 ;;
+    -l|--length) arg_code_length="$2"; shift 2 ;;
+    -s|--start) arg_start_code="$2"; shift 2 ;;
+    -p|--pattern) arg_pattern="$2"; shift 2 ;;
+    --patterns) arg_patterns="$2"; shift 2 ;;
+    --strategy) arg_strategy="$2"; shift 2 ;;
+    --command) arg_command_profile="$2"; shift 2 ;;
+    *) fail "Unknown option: $1"; show_help ;;
   esac
 done
 
-# ---------------- DEVICE DETECTION ----------------
-# Get the current device name
-if [[ -n "${manual_device}" ]]; then
-  device="${manual_device}"
-else
-  devices=( $(fastboot devices) )
-  device="${devices[0]}"
-  if [[ -z "${device}" ]]; then
-    echo "No device detected in fastboot mode. Please connect a device."
-    exit 1
-  fi
-fi
-
-printf "Current device: %s\n" "$device"
-devfile="./${device}.dat"
+banner
+section "LINK" "checking local tools and fastboot transport"
+check_dependencies
+detect_device
 
 # ---------------- DEVICE CONFIGURATION ----------------
-# Define character sets
-numeric_charset='0123456789'
-alpha_charset='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-moto_charset='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'  # Optimized for Motorola
+read_devfile
 
-# If device data file doesn't exist, or we're overriding settings
-if [[ ! -f "${devfile}" || -n "${arg_code_type}" || -n "${arg_code_length}" || -n "${arg_strategy}" ]]; then
-  # Set code type
-  if [[ -n "${arg_code_type}" ]]; then
-    code_type="${arg_code_type}"
+if [[ -n "${arg_code_type}" ]]; then code_type="${arg_code_type}"; fi
+if [[ -n "${arg_code_length}" ]]; then code_length="${arg_code_length}"; fi
+if [[ -n "${arg_strategy}" ]]; then strategy="${arg_strategy}"; fi
+if [[ -n "${arg_command_profile}" ]]; then command_profile="${arg_command_profile}"; fi
+
+code_type=${code_type:-moto}
+code_length=${code_length:-${DEFAULT_CODE_LENGTH}}
+strategy=${strategy:-${DEFAULT_STRATEGY}}
+command_profile=${command_profile:-${DEFAULT_COMMAND_PROFILE}}
+known_positions=${known_positions:-}
+last_value=${last_value:-0}
+
+if [[ -n "${arg_start_code}" ]]; then
+  if [[ "${arg_start_code}" =~ ^[0-9]+$ ]]; then
+    last_value="${arg_start_code}"
   else
-    # Prompt for code type if not specified
-    if [[ ! -f "${devfile}" ]]; then
-      echo "Select code type:"
-      echo "1) Numeric (0-9)"
-      echo "2) Alphanumeric (A-Z, 0-9)"
-      echo "3) Motorola specific (optimized for Motorola devices)"
-      read -r -p "Enter choice [3]: " choice
-      
-      case "${choice}" in
-        1) code_type="numeric" ;;
-        2) code_type="alpha" ;;
-        *) code_type="moto" ;;
-      esac
-    fi
-  fi
-  
-  # Set code length
-  if [[ -n "${arg_code_length}" ]]; then
-    code_length="${arg_code_length}"
-  elif [[ ! -f "${devfile}" ]]; then
-    if [[ "${code_type}" == "moto" ]]; then
-      read -r -p "Enter code length [${DEFAULT_CODE_LENGTH}]: " code_length
-      code_length=${code_length:-${DEFAULT_CODE_LENGTH}}
-    else
-      read -r -p "Enter code length: " code_length
-    fi
-  fi
-  
-  # Set strategy
-  if [[ -n "${arg_strategy}" ]]; then
-    strategy="${arg_strategy}"
-  elif [[ ! -f "${devfile}" ]]; then
-    echo "Select brute force strategy:"
-    echo "1) Sequential (try all codes in order)"
-    echo "2) Random (try random codes)"
-    echo "3) Smart (use patterns and optimizations)"
-    read -r -p "Enter choice [1]: " choice
-    
-    case "${choice}" in
-      2) strategy="random" ;;
-      3) strategy="smart" ;;
-      *) strategy="sequential" ;;
-    esac
-  fi
-  
-  # Set Motorola pattern if applicable
-  if [[ "${code_type}" == "moto" ]]; then
-    if [[ -n "${arg_moto_pattern}" ]]; then
-      moto_pattern="${arg_moto_pattern}"
-    elif [[ ! -f "${devfile}" ]]; then
-      echo "Select Motorola code pattern:"
-      echo "1) 19 uppercase letters + 1 number at the end (e.g., ABCDEFGHIJKLMNOPQRS5)"
-      echo "2) 4 uppercase letters + 1 number + 15 uppercase letters (e.g., ABCD5EFGHIJKLMNOPQRST)"
-      echo "3) No specific pattern"
-      read -r -p "Enter choice [1]: " choice
-      
-      case "${choice}" in
-        2) moto_pattern="2" ;;
-        3) moto_pattern="" ;;
-        *) moto_pattern="1" ;;
-      esac
-    fi
-  fi
-  
-  # Set starting value
-  if [[ -n "${arg_start_code}" ]]; then
-    # TODO: Convert start code to number
-    last_value=0
-  else
+    warn "--start currently accepts numeric offset only. Using 0."
     last_value=0
   fi
-  
-  # Initialize known positions (empty by default)
-  known_positions=""
-  
-  # Ask if user knows any specific positions in the code
-  if [[ ! -f "${devfile}" ]]; then
-    read -r -p "Do you know any specific characters in the code? (y/n) [n]: " has_known
-    if [[ "${has_known}" == "y" ]]; then
-      echo "Enter known positions in format position:character (e.g., 5:A;10:B)"
-      read -r -p "> " known_positions
-    fi
-  fi
-  
-  # Write to device file
-  write_devfile
-else
-  # Read from device file
-  read_devfile
 fi
 
-# Set character set based on code type
 case "${code_type}" in
-  numeric)
-    charset="${numeric_charset}"
-    ;;
-  alpha)
-    charset="${alpha_charset}"
-    ;;
-  moto)
-    charset="${moto_charset}"
-    ;;
-  *)
-    echo "Invalid code type: ${code_type}"
-    exit 1
-    ;;
+  numeric) charset="${DIGITS}" ;;
+  alpha) charset="${UPPER_ALNUM}" ;;
+  moto) charset="${UPPER_ALNUM}" ;;
+  *) fail "Invalid code type: ${code_type}"; exit 1 ;;
 esac
 
-# Calculate total possible combinations
-base=${#charset}
-if [[ "${strategy}" == "sequential" ]]; then
-  total_combinations=$(( base ** code_length ))
-else
-  # For random and smart strategies, just use a large number for progress display
-  total_combinations=1000000
+if [[ -n "${arg_patterns}" ]]; then
+  patterns="${arg_patterns}"
+elif [[ -n "${arg_pattern}" ]]; then
+  patterns="custom:${arg_pattern}:10:User-provided mask"
+elif [[ -z "${patterns}" && "${code_type}" == "moto" ]]; then
+  patterns="${BUILTIN_PATTERNS}"
 fi
 
-# ---------------- MAIN LOOP ----------------
-# Run pre-flight checks
-check_dependencies
-check_device_connected
+if [[ -n "${patterns}" ]]; then
+  split_patterns
+  for entry in "${pattern_entries[@]}"; do
+    IFS=':' read -r name mask weight note <<< "${entry}"
+    if ! validate_pattern "${mask}"; then
+      fail "Invalid pattern '${mask}' in entry '${entry}'"
+      exit 1
+    fi
+  done
+  ensure_pattern_offsets
+fi
 
-# Trap to save data on exit
-trap 'write_devfile; echo -e "\nProgress saved. Resume with: $0"; exit' EXIT SIGINT
+case "${strategy}" in
+  sequential|random|smart) ;;
+  *) fail "Invalid strategy: ${strategy}"; exit 1 ;;
+esac
 
-# Start time for estimation
+detect_unlock_command "${command_profile}"
+write_devfile
+
+section "RULE" "authorized use confirmation"
+echo "This script sends repeated fastboot unlock attempts to one connected device."
+echo "Use only on devices you own or are explicitly authorized to service."
+read -r -p "Type AUTHORIZED to continue: " auth_confirm
+if [[ "${auth_confirm}" != "AUTHORIZED" ]]; then
+  fail "Authorization not confirmed. Aborted."
+  exit 1
+fi
+
+trap 'write_devfile; echo -e "\nProgress saved. Resume with: '$0'"' EXIT SIGINT
+
+section "PLAN" "runtime profile"
+echo "Device:           ${device}"
+echo "State file:       ${devfile}"
+echo "Command:          $(command_label)"
+echo "Strategy:         ${strategy}"
+
+if command_needs_code; then
+  echo "Code type:        ${code_type}"
+  if [[ -n "${patterns}" ]]; then
+    echo "Pattern schedule: weighted priority"
+    split_patterns
+    for entry in "${pattern_entries[@]}"; do
+      IFS=':' read -r name mask weight note <<< "${entry}"
+      printf "  - %-22s mask=%-12s weight=%s space=%s\n" "${name}" "${mask}" "${weight}" "$(pattern_space "${mask}")"
+    done
+  else
+    total_combinations=$(safe_total_combinations "${#charset}" "${code_length}")
+    echo "Length:           ${code_length}"
+    echo "Search space:     ${total_combinations}"
+  fi
+else
+  warn "Selected command does not take a code. Script will run it once, then device may ask for confirmation."
+fi
+
+echo "Press Ctrl+C to save progress."
+echo "------------------------------------------------------------"
+
 start_time=$(date +%s)
 attempts=0
-status_update_interval=10  # Update status every 10 attempts
+status_update_interval=10
 
-echo "Starting bootloader unlock attempts..."
-echo "Code type: ${code_type}, Length: ${code_length}, Strategy: ${strategy}"
-if [[ "${code_type}" == "moto" && -n "${moto_pattern}" ]]; then
-  echo "Using Motorola pattern: ${moto_pattern}"
+if ! command_needs_code; then
+  section "RUN" "starting no-code unlock command"
+  output=$(run_unlock_command "")
+  status=$?
+  echo "${output}"
+  if [[ ${status} -eq 0 ]] && ! is_fastboot_failure "${output}"; then
+    ok "Command sent. Confirm unlock on device screen if prompted."
+    exit 0
+  fi
+  fail "Unlock command failed."
+  exit 1
 fi
-echo "Press Ctrl+C to pause and save progress"
-echo "----------------------------------------"
+
+section "RUN" "starting code attempts"
 
 while true; do
   code=$(next_code)
-  
-  # Try to unlock the device
+
   if try_unlock "${code}"; then
-    echo -e "\nSUCCESS! Your unlock code is: ${code}"
-    # Save the successful code
-    echo "${code}" > "./SUCCESS_${device}.txt"
+    echo -e "\n${GREEN}${BOLD}SUCCESS${RESET} unlock code: ${code}"
+    echo "${code}" > "${success_file}"
+    ok "Saved successful code to ${success_file}"
     break
+  else
+    result=$?
+    if [[ ${result} -eq 2 ]]; then
+      echo -e "\n${RED}${BOLD}TERMINAL FASTBOOT ERROR${RESET}"
+      echo "${output}"
+      fail "Stopping. Command unsupported, OEM unlock disabled, carrier lock, or device policy block."
+      exit 1
+    fi
   fi
-  
-  # Update progress
+
   (( attempts++ ))
   (( last_value++ ))
-  
-  # Only update the display occasionally to improve performance
+  advance_pattern_offset
+
   if (( attempts % status_update_interval == 0 )); then
     current_time=$(date +%s)
     elapsed=$(( current_time - start_time ))
-    
-    # Clear the line and show progress
     echo -ne "\033[K"
-    
-    if [[ "${strategy}" == "sequential" ]]; then
-      remaining=$(estimate_time ${last_value} ${total_combinations} ${elapsed})
-      progress_pct=$(bc -l <<< "scale=3; ${last_value}*100/${total_combinations}")
-      echo -ne "Trying: ${code} | Attempt: ${attempts} | Progress: ${progress_pct}% | Est. remaining: ${remaining}\r"
+
+    if [[ -n "${patterns}" ]]; then
+      if [[ "${selected_pattern_space}" != "huge" ]]; then
+        progress_pct=$(percent_x1000 "${selected_pattern_offset}" "${selected_pattern_space}")
+      else
+        progress_pct="n/a"
+      fi
+      echo -ne "Trying: ${code} | Attempt: ${attempts} | Pattern: ${selected_pattern_name} (${selected_pattern_mask}) | Offset: ${selected_pattern_offset} | Pattern progress: ${progress_pct}% | Elapsed: ${elapsed}s\r"
     else
-      echo -ne "Trying: ${code} | Attempts: ${attempts} | Elapsed: ${elapsed}s\r"
+      total_combinations=$(safe_total_combinations "${#charset}" "${code_length}")
+      progress_pct=$(percent_x1000 "${last_value}" "${total_combinations}")
+      remaining=$(estimate_time "${last_value}" "${total_combinations}" "${elapsed}")
+      echo -ne "Trying: ${code} | Attempt: ${attempts} | Progress: ${progress_pct}% | Est. remaining: ${remaining}\r"
     fi
-    
-    # Save progress periodically
+
     if (( attempts % 100 == 0 )); then
       write_devfile
     fi
   fi
 done
 
-echo "Bootloader unlock complete!"
+ok "Bootloader unlock complete."
 exit 0
