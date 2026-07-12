@@ -190,7 +190,7 @@ function Run-Unlock {
         "flashing-unlock"{
             $out = Invoke-Fastboot @("flashing","unlock")
             Write-Log $out
-            if ($out -match "(unknown command|invalid command|unrecognized command|not found)") {
+            if ($out -match "((unknown|invalid|unrecognized) command|not found)") {
                 Write-Log "ℹ️ 'fastboot flashing unlock' is unsupported; retrying with 'fastboot oem unlock'."
                 $out = Invoke-Fastboot @("oem","unlock")
                 Write-Log $out
