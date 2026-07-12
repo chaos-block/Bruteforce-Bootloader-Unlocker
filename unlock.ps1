@@ -126,17 +126,7 @@ function Get-Device {
 function Detect-Profile {
     if ($Command -ne "auto") { return $Command }
 
-    $candidates = @(
-        @("flashing","unlock"),
-        @("oem","unlock")
-    )
-    foreach ($c in $candidates) {
-        $out = Invoke-Fastboot $c
-        if ($out -notmatch "(FAILED|error|waiting|HANG)") {
-            return ($c[0] + "-" + $c[1])
-        }
-    }
-    throw "Unable to autodetect a supported unlock command."
+    return "flashing-unlock"
 }
 
 # --------------------------------------------------
@@ -200,6 +190,11 @@ function Run-Unlock {
         "flashing-unlock"{
             $out = Invoke-Fastboot @("flashing","unlock")
             Write-Log $out
+            if ($out -match "(unknown command|invalid command|unrecognized command|not found)") {
+                Write-Log "ℹ️ 'fastboot flashing unlock' is unsupported; retrying with 'fastboot oem unlock'."
+                $out = Invoke-Fastboot @("oem","unlock")
+                Write-Log $out
+            }
             return $out -notmatch "(FAILED|error|waiting|HANG)"
         }
         "oem-unlock"{
