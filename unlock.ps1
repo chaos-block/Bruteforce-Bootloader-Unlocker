@@ -177,7 +177,7 @@ function Expand-Pattern {
 # --------------------------------------------------
 function Run-Unlock {
     $fastbootFailurePattern = "(FAILED|error|waiting|HANG)"
-    $unsupportedCommandPattern = "((unknown|invalid|unrecognized) command|not found|usage:)"
+    $unsupportedCommandPattern = "(?i)((unknown|invalid|unrecognized) command|not found|usage:)"
 
     $device = Get-Device
     if (-not $device) {
@@ -198,6 +198,7 @@ function Run-Unlock {
                 $out = Invoke-Fastboot @("oem","unlock")
                 Write-Log $out
                 if ($out -match $unsupportedCommandPattern) {
+                    Write-Log "❌ 'fastboot oem unlock' is also unsupported on this device."
                     return $false
                 }
             }
