@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     PowerShell bootloader‑unlocker with:
-      • Fastboot discovery (PATH → script folder)
+      • Fastboot discovery (script folder → CWD → PATH)
       • IMEI‑named log file placed beside the script
       • Watchdog that restarts the routine if a fastboot call hangs
       • Pattern generation using the original DSL (9, A, a, X, x, H, h, ?)
@@ -22,16 +22,28 @@ $MaxRestarts      = 3                          # how many times to retry the who
 $ScriptFolder     = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # --------------------------------------------------
-# 2️⃣  Locate fastboot (PATH first, then script folder)
+# 2️⃣  Locate fastboot (script folder → CWD → PATH)
 # --------------------------------------------------
 function Get-FastbootPath {
+    # 1) Beside this script – highest priority; avoids PATH ambiguity entirely.
+    $scriptLocal = Join-Path $ScriptFolder "fastboot.exe"
+    if (Test-Path $scriptLocal) {
+        $resolved = Resolve-Path $scriptLocal -ErrorAction SilentlyContinue
+        if ($resolved) { return $resolved.Path }
+    }
+
+    # 2) Current working directory – user may have launched from platform-tools folder.
+    $cwdLocal = Join-Path (Get-Location).Path "fastboot.exe"
+    if (Test-Path $cwdLocal) {
+        $resolved = Resolve-Path $cwdLocal -ErrorAction SilentlyContinue
+        if ($resolved) { return $resolved.Path }
+    }
+
+    # 3) Fall back to PATH.
     $cmd = Get-Command fastboot.exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
 
-    $local = Join-Path $ScriptFolder "fastboot.exe"
-    if (Test-Path $local) { return $local }
-
-    throw "fastboot.exe not found – add it to PATH or place it beside this script."
+    throw "fastboot.exe not found. Place it beside unlock.ps1, in the current folder, or add it to PATH."
 }
 $Fastboot = Get-FastbootPath
 
@@ -52,6 +64,7 @@ function Invoke-Fastboot {
 
     $proc = Start-Process -FilePath $Fastboot `
                            -ArgumentList $args `
+                           -WorkingDirectory (Split-Path -Parent $Fastboot) `
                            -NoNewWindow `
                            -RedirectStandardOutput $tmpOut `
                            -RedirectStandardError  $tmpErr `
