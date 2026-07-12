@@ -177,7 +177,7 @@ function Expand-Pattern {
 # --------------------------------------------------
 function Run-Unlock {
     $fastbootFailurePattern = "(FAILED|error|waiting|HANG)"
-    $unsupportedCommandPattern = "((unknown|invalid|unrecognized) command|not found)"
+    $unsupportedCommandPattern = "((unknown|invalid|unrecognized) command|not found|usage:)"
 
     $device = Get-Device
     if (-not $device) {
@@ -197,6 +197,9 @@ function Run-Unlock {
                 Write-Log "ℹ️ 'fastboot flashing unlock' is unsupported; retrying with 'fastboot oem unlock'."
                 $out = Invoke-Fastboot @("oem","unlock")
                 Write-Log $out
+                if ($out -match $unsupportedCommandPattern) {
+                    return $false
+                }
             }
             return $out -notmatch $fastbootFailurePattern
         }
