@@ -176,6 +176,9 @@ function Expand-Pattern {
 # 7️⃣  Core unlock routine (runs once)
 # --------------------------------------------------
 function Run-Unlock {
+    $fastbootFailurePattern = "(FAILED|error|waiting|HANG)"
+    $unsupportedCommandPattern = "((unknown|invalid|unrecognized) command|not found)"
+
     $device = Get-Device
     if (-not $device) {
         Write-Log "❌ No fastboot device detected – connect the phone in bootloader mode."
@@ -190,17 +193,17 @@ function Run-Unlock {
         "flashing-unlock"{
             $out = Invoke-Fastboot @("flashing","unlock")
             Write-Log $out
-            if ($out -match "((unknown|invalid|unrecognized) command|not found)") {
+            if ($out -match $unsupportedCommandPattern) {
                 Write-Log "ℹ️ 'fastboot flashing unlock' is unsupported; retrying with 'fastboot oem unlock'."
                 $out = Invoke-Fastboot @("oem","unlock")
                 Write-Log $out
             }
-            return $out -notmatch "(FAILED|error|waiting|HANG)"
+            return $out -notmatch $fastbootFailurePattern
         }
         "oem-unlock"{
             $out = Invoke-Fastboot @("oem","unlock")
             Write-Log $out
-            return $out -notmatch "(FAILED|error|waiting|HANG)"
+            return $out -notmatch $fastbootFailurePattern
         }
         "flashing-unlock-code"{
             foreach($pat in $Patterns){
@@ -208,7 +211,7 @@ function Run-Unlock {
                 foreach($code in $cands){
                     $out = Invoke-Fastboot @("flashing","unlock",$code)
                     Write-Log "Trying $code → $out"
-                    if($out -notmatch "(FAILED|error|waiting|HANG)"){
+                    if($out -notmatch $fastbootFailurePattern){
                         Write-Log "✅ SUCCESS – unlock code: $code"
                         return $true
                     }
@@ -222,7 +225,7 @@ function Run-Unlock {
                 foreach($code in $cands){
                     $out = Invoke-Fastboot @("oem","unlock",$code)
                     Write-Log "Trying $code → $out"
-                    if($out -notmatch "(FAILED|error|waiting|HANG)"){
+                    if($out -notmatch $fastbootFailurePattern){
                         Write-Log "✅ SUCCESS – unlock code: $code"
                         return $true
                     }
