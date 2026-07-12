@@ -36,11 +36,51 @@ function Get-FastbootPath {
 $Fastboot = Get-FastbootPath
 
 # --------------------------------------------------
-# 3️⃣  IMEI‑named log file in the script folder
+# 3️⃣  Fastboot wrapper with hang detection
 # --------------------------------------------------
+# FIX: Moved above Get-DeviceImei so it is defined before its first invocation.
+# FIX: Use GUID-named temp files in $env:TEMP to avoid collisions and permission
+#      issues with fixed "stdout.tmp"/"stderr.tmp" in the working directory.
+#      Cleanup now also runs in the timeout (hang) path.
+# FIX: Use Write-Host (not Write-Log) for the hang warning here because Write-Log
+#      depends on $LogFile which is not yet set at the time Get-DeviceImei runs.
+function Invoke-Fastboot {
+    param([string]$args)
+
+    $tmpOut = Join-Path $env:TEMP ("fastboot_stdout_{0}.tmp" -f [guid]::NewGuid())
+    $tmpErr = Join-Path $env:TEMP ("fastboot_stderr_{0}.tmp" -f [guid]::NewGuid())
+
+    $proc = Start-Process -FilePath $Fastboot `
+                           -ArgumentList $args `
+                           -NoNewWindow `
+                           -RedirectStandardOutput $tmpOut `
+                           -RedirectStandardError  $tmpErr `
+                           -PassThru
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $proc.HasExited) {
+        if ($sw.Elapsed.TotalSeconds -gt $HangTimeout) {
+            Write-Host "⚠️ Fastboot call '$args' hung (> $HangTimeout s). Killing."
+            $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+            Remove-Item $tmpOut,$tmpErr -ErrorAction SilentlyContinue
+            return "HANG"
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    $out = if (Test-Path $tmpOut) { Get-Content $tmpOut -Raw } else { "" }
+    $err = if (Test-Path $tmpErr) { Get-Content $tmpErr -Raw } else { "" }
+    Remove-Item $tmpOut,$tmpErr -ErrorAction SilentlyContinue
+    return $out + $err
+}
+
+# --------------------------------------------------
+# 4️⃣  IMEI‑named log file in the script folder
+# --------------------------------------------------
+# Invoke-Fastboot is now defined above, so this call succeeds at script load time.
 function Get-DeviceImei {
     $out = Invoke-Fastboot "getvar all"
-    foreach ($line in $out -split "`n") {
+    # FIX: Split on CRLF or LF to handle both Windows and Unix output.
+    foreach ($line in ($out -split '\r?\n')) {
         if ($line -match "imei\s*:\s*(\S+)") { return $Matches[1] }
     }
     return $null
@@ -57,38 +97,15 @@ function Write-Log {
 }
 
 # --------------------------------------------------
-# 4️⃣  Fastboot wrapper with hang detection
-# --------------------------------------------------
-function Invoke-Fastboot {
-    param([string]$args)
-
-    $proc = Start-Process -FilePath $Fastboot `
-                           -ArgumentList $args `
-                           -NoNewWindow -RedirectStandardOutput "stdout.tmp" `
-                           -RedirectStandardError  "stderr.tmp" `
-                           -PassThru
-
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while (-not $proc.HasExited) {
-        if ($sw.Elapsed.TotalSeconds -gt $HangTimeout) {
-            Write-Log "⚠️ Fastboot call '$args' hung (> $HangTimeout s). Killing."
-            $proc | Stop-Process -Force
-            return "HANG"
-        }
-        Start-Sleep -Milliseconds 200
-    }
-    $out = Get-Content "stdout.tmp" -Raw
-    $err = Get-Content "stderr.tmp" -Raw
-    Remove-Item "stdout.tmp","stderr.tmp" -ErrorAction SilentlyContinue
-    return $out + $err
-}
-
-# --------------------------------------------------
 # 5️⃣  Device detection & profile auto‑detect
 # --------------------------------------------------
 function Get-Device {
     $out = Invoke-Fastboot "devices"
-    if ($out -match "^([a-zA-Z0-9:_-]+)\s+fastboot") { return $Matches[1] }
+    # FIX: Use (?m) multiline flag so ^ matches the start of each line in the output.
+    # Allow optional leading whitespace and handle both spaces and tabs between
+    # the serial number and the "fastboot" token (covers CRLF/LF and spacing variations).
+    # No trailing anchor so lines with any extra whitespace/content still match.
+    if ($out -match "(?m)^\s*([A-Za-z0-9:_-]+)\s+fastboot") { return $Matches[1] }
     return $null
 }
 function Detect-Profile {
