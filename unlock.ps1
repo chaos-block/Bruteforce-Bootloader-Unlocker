@@ -79,8 +79,8 @@ function Invoke-Fastboot {
 # Invoke-Fastboot is now defined above, so this call succeeds at script load time.
 function Get-DeviceImei {
     $out = Invoke-Fastboot "getvar all"
-    # FIX: Split on any line ending (CRLF or LF) to handle both Windows and Unix output.
-    foreach ($line in ($out -split "(`r`n|`n|`r)")) {
+    # FIX: Split on CRLF or LF to handle both Windows and Unix output.
+    foreach ($line in ($out -split '\r?\n')) {
         if ($line -match "imei\s*:\s*(\S+)") { return $Matches[1] }
     }
     return $null
@@ -102,9 +102,10 @@ function Write-Log {
 function Get-Device {
     $out = Invoke-Fastboot "devices"
     # FIX: Use (?m) multiline flag so ^ matches the start of each line in the output.
-    # Also allow optional leading whitespace and handle both spaces and tabs between
+    # Allow optional leading whitespace and handle both spaces and tabs between
     # the serial number and the "fastboot" token (covers CRLF/LF and spacing variations).
-    if ($out -match "(?m)^\s*([A-Za-z0-9:_-]+)\s+fastboot\s*$") { return $Matches[1] }
+    # No trailing anchor so lines with any extra whitespace/content still match.
+    if ($out -match "(?m)^\s*([A-Za-z0-9:_-]+)\s+fastboot") { return $Matches[1] }
     return $null
 }
 function Detect-Profile {
