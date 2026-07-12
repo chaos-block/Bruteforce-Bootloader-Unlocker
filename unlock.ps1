@@ -113,17 +113,18 @@ function Expand-Pattern {
         [Parameter(Mandatory)][int]$Count
     )
 
-    # ----- ONE‑TIME MAP – NO DUPLICATE KEYS -----
-    $charMap = @{
-        '9' = '[0-9]'          # numeric
-        'A' = '[A-Z]'          # uppercase letters
-        'a' = '[a-z]'          # lowercase letters
-        'X' = '[A-Z0-9]'       # uppercase alphanumeric
-        'x' = '[A-Za-z0-9]'    # mixed‑case alphanumeric
-        'H' = '[0-9A-F]'       # hex upper
-        'h' = '[0-9a-f]'       # hex lower
-        '?' = '[A-Za-z0-9]'    # wildcard (same as mixed alphanumeric)
-    }
+    # ----- ONE‑TIME MAP – CASE‑SENSITIVE DICTIONARY -----
+    # PowerShell hash literals are case-insensitive, so 'A' and 'a' would
+    # collide.  Use an Ordinal-keyed Dictionary to keep all eight distinct tokens.
+    $charMap = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    $charMap.Add('9', '[0-9]')        # numeric
+    $charMap.Add('A', '[A-Z]')        # uppercase letters
+    $charMap.Add('a', '[a-z]')        # lowercase letters
+    $charMap.Add('X', '[A-Z0-9]')     # uppercase alphanumeric
+    $charMap.Add('x', '[A-Za-z0-9]')  # mixed‑case alphanumeric
+    $charMap.Add('H', '[0-9A-F]')     # hex upper
+    $charMap.Add('h', '[0-9a-f]')     # hex lower
+    $charMap.Add('?', '[A-Za-z0-9]')  # wildcard (same as mixed alphanumeric)
 
     # Translate DSL tokens into a regex‑like pattern
     $regex = $Pattern
