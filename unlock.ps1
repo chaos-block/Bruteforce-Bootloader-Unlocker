@@ -57,13 +57,13 @@ $Fastboot = Get-FastbootPath
 # FIX: Use Write-Host (not Write-Log) for the hang warning here because Write-Log
 #      depends on $LogFile which is not yet set at the time Get-DeviceImei runs.
 function Invoke-Fastboot {
-    param([string]$args)
+    param([string[]]$Arguments)
 
     $tmpOut = Join-Path $env:TEMP ("fastboot_stdout_{0}.tmp" -f [guid]::NewGuid())
     $tmpErr = Join-Path $env:TEMP ("fastboot_stderr_{0}.tmp" -f [guid]::NewGuid())
 
     $proc = Start-Process -FilePath $Fastboot `
-                           -ArgumentList $args `
+                           -ArgumentList $Arguments `
                            -WorkingDirectory (Split-Path -Parent $Fastboot) `
                            -NoNewWindow `
                            -RedirectStandardOutput $tmpOut `
@@ -73,7 +73,7 @@ function Invoke-Fastboot {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while (-not $proc.HasExited) {
         if ($sw.Elapsed.TotalSeconds -gt $HangTimeout) {
-            Write-Host "⚠️ Fastboot call '$args' hung (> $HangTimeout s). Killing."
+            Write-Host ("⚠️ Fastboot call '{0}' hung (> {1} s). Killing." -f ($Arguments -join ' '), $HangTimeout)
             $proc | Stop-Process -Force -ErrorAction SilentlyContinue
             Remove-Item $tmpOut,$tmpErr -ErrorAction SilentlyContinue
             return "HANG"
@@ -91,7 +91,7 @@ function Invoke-Fastboot {
 # --------------------------------------------------
 # Invoke-Fastboot is now defined above, so this call succeeds at script load time.
 function Get-DeviceImei {
-    $out = Invoke-Fastboot "getvar all"
+    $out = Invoke-Fastboot @("getvar","all")
     # FIX: Split on CRLF or LF to handle both Windows and Unix output.
     foreach ($line in ($out -split '\r?\n')) {
         if ($line -match "imei\s*:\s*(\S+)") { return $Matches[1] }
@@ -113,22 +113,27 @@ function Write-Log {
 # 5️⃣  Device detection & profile auto‑detect
 # --------------------------------------------------
 function Get-Device {
-    $out = Invoke-Fastboot "devices"
-    # FIX: Use (?m) multiline flag so ^ matches the start of each line in the output.
-    # Allow optional leading whitespace and handle both spaces and tabs between
-    # the serial number and the "fastboot" token (covers CRLF/LF and spacing variations).
-    # No trailing anchor so lines with any extra whitespace/content still match.
-    if ($out -match "(?m)^\s*([A-Za-z0-9:_-]+)\s+fastboot") { return $Matches[1] }
+    Write-Host "DEBUG fastboot path: $Fastboot"
+    $out = Invoke-Fastboot @("devices")
+    Write-Host ("DEBUG fastboot devices raw: " + ($out -replace "`r","\\r" -replace "`n","\\n"))
+    # FIX: Trim each line and match serial + "fastboot" token to handle spacing/tab variations.
+    foreach ($line in ($out -split '\r?\n')) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^([A-Za-z0-9:_-]+)\s+fastboot') { return $Matches[1] }
+    }
     return $null
 }
 function Detect-Profile {
     if ($Command -ne "auto") { return $Command }
 
-    $candidates = @("flashing unlock","oem unlock")
+    $candidates = @(
+        @("flashing","unlock"),
+        @("oem","unlock")
+    )
     foreach ($c in $candidates) {
         $out = Invoke-Fastboot $c
         if ($out -notmatch "(FAILED|error|waiting|HANG)") {
-            return $c -replace "\s.*$"
+            return ($c[0] + "-" + $c[1])
         }
     }
     throw "Unable to autodetect a supported unlock command."
@@ -193,12 +198,12 @@ function Run-Unlock {
 
     switch ($profile) {
         "flashing-unlock"{
-            $out = Invoke-Fastboot "flashing unlock"
+            $out = Invoke-Fastboot @("flashing","unlock")
             Write-Log $out
             return $out -notmatch "(FAILED|error|waiting|HANG)"
         }
         "oem-unlock"{
-            $out = Invoke-Fastboot "oem unlock"
+            $out = Invoke-Fastboot @("oem","unlock")
             Write-Log $out
             return $out -notmatch "(FAILED|error|waiting|HANG)"
         }
@@ -206,7 +211,7 @@ function Run-Unlock {
             foreach($pat in $Patterns){
                 $cands = Expand-Pattern -Pattern $pat -Count $MaxPerPattern
                 foreach($code in $cands){
-                    $out = Invoke-Fastboot "flashing unlock $code"
+                    $out = Invoke-Fastboot @("flashing","unlock",$code)
                     Write-Log "Trying $code → $out"
                     if($out -notmatch "(FAILED|error|waiting|HANG)"){
                         Write-Log "✅ SUCCESS – unlock code: $code"
@@ -220,7 +225,7 @@ function Run-Unlock {
             foreach($pat in $Patterns){
                 $cands = Expand-Pattern -Pattern $pat -Count $MaxPerPattern
                 foreach($code in $cands){
-                    $out = Invoke-Fastboot "oem unlock $code"
+                    $out = Invoke-Fastboot @("oem","unlock",$code)
                     Write-Log "Trying $code → $out"
                     if($out -notmatch "(FAILED|error|waiting|HANG)"){
                         Write-Log "✅ SUCCESS – unlock code: $code"
