@@ -439,10 +439,12 @@ function Get-WeightedPatternIndex {
 
 function Get-RandomPatternIndex {
     param([object[]]$Entries, [System.Random]$Rng)
-    $total = Get-TotalWeight $Entries
+    [long]$total = Get-TotalWeight $Entries
     if ($total -le 0) { return 0 }
-    $slot = $Rng.Next(0, [int]$total)
-    [int]$cum = 0
+    # Clamp to Int32 range for System.Random.Next; pattern weights are expected to be small.
+    $maxVal = [Math]::Min($total, [int]::MaxValue)
+    [long]$slot = $Rng.Next(0, [int]$maxVal)
+    [long]$cum  = 0
     for ($i = 0; $i -lt $Entries.Count; $i++) {
         $cum += $Entries[$i].Weight
         if ($slot -lt $cum) { return $i }
@@ -453,16 +455,56 @@ function Get-RandomPatternIndex {
 # ─────────────────────────────────────────────────────────────────────────────
 # 12  ERROR CLASSIFICATION  (mirrors is_terminal_fastboot_error / is_fastboot_failure)
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Patterns that indicate the device will never accept an unlock in its current state.
+# Checked individually so each is easy to read and extend.
+$TerminalErrorPatterns = @(
+    '(?i)unknown.?command',              # fastboot command not understood by device
+    '(?i)not.?supported',                # feature explicitly unsupported
+    '(?i)not.?allowed',                  # OEM/policy block (covers "not allowed" variants)
+    '(?i)unlock.?ability.?is.?0',        # get_unlock_ability returned 0
+    '(?i)unlock_ability.*0',             # alternate format for unlock ability = 0
+    '(?i)oem.?unlock.?is.?not.?allowed', # explicit oem unlock policy denial
+    '(?i)flashing.?unlock.?is.?not.?allowed', # explicit flashing unlock policy denial
+    '(?i)permission.?denied',            # OS-level permission block
+    '(?i)locked.?by.?carrier',           # carrier/SIM lock
+    '(?i)carrier.?lock',
+    '(?i)\bfrp\b',                       # Factory Reset Protection active
+    '(?i)not.?unlockable',               # device flagged as non-unlockable
+    '(?i)bootloader.?lock'               # bootloader locked by policy (e.g. enterprise MDM)
+)
+
+# Patterns that indicate a generic (retryable) failure — wrong code, transient error, etc.
+$FailurePatterns = @(
+    '(?i)FAILED',
+    '(?i)fail(ed|ure)?',
+    '(?i)\berror\b',
+    '(?i)\binvalid\b',
+    '(?i)\bdenied\b',
+    '(?i)\bwrong\b',
+    '(?i)\bincorrect\b',
+    '(?i)not.?match',
+    '(?i)mismatch',
+    '(?i)remote:'
+)
+
 function Test-TerminalError {
-    # Errors that indicate the device will never accept unlock in this state.
+    # Returns $true when output signals a condition that will not change on retry.
     # Stop immediately — retrying is pointless and may worsen the situation.
     param([string]$Output)
-    return $Output -match '(?i)(unknown.?command|not.?supported|not.?allowed|unlock.?ability.?is.?0|unlock_ability.*0|oem.?unlock.?is.?not.?allowed|flashing.?unlock.?is.?not.?allowed|permission.?denied|locked.?by.?carrier|carrier.?lock|frp|not.?unlockable|bootloader.?lock)'
+    foreach ($pat in $TerminalErrorPatterns) {
+        if ($Output -match $pat) { return $true }
+    }
+    return $false
 }
 
 function Test-FastbootFailure {
+    # Returns $true when output contains a generic failure indicator.
     param([string]$Output)
-    return $Output -match '(?i)(FAILED|fail(ed|ure)?|error|invalid|denied|wrong|incorrect|not.?match|mismatch|remote:)'
+    foreach ($pat in $FailurePatterns) {
+        if ($Output -match $pat) { return $true }
+    }
+    return $false
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -589,7 +631,9 @@ if ($script:State["pattern_offsets"]) {
     }
 }
 
-# -Start overrides offset for pattern index 0.
+# -Start overrides the offset only for pattern index 0 (the highest-priority pattern).
+# Pattern index 0 is the first entry in the active pattern list (shown in the plan above).
+# To resume a specific run, use the offset printed in the log or status line.
 if ($Start -ge 0) {
     $offsets[0] = $Start
     Write-Log "Starting from offset $Start (pattern 0)"
@@ -672,8 +716,16 @@ try {
             $progress = if ($space -ne "huge" -and [long]$space -gt 0) {
                 "{0:F3}%" -f ($offsets[$idx] * 100.0 / [long]$space)
             } else { "n/a" }
-            Write-Host ("`rTrying: $code | Attempt: $cursor | Pattern: $($entry.Name) ($($entry.Mask)) | " +
-                        "Offset: $($offsets[$idx]) | Progress: $progress | Elapsed: ${elapsed}s   ") -NoNewline
+            # Build status parts separately for readability before joining.
+            $statusParts = @(
+                "Trying: $code",
+                "Attempt: $cursor",
+                "Pattern: $($entry.Name) ($($entry.Mask))",
+                "Offset: $($offsets[$idx])",
+                "Progress: $progress",
+                "Elapsed: ${elapsed}s"
+            )
+            Write-Host ("`r$($statusParts -join ' | ')   ") -NoNewline
         }
 
         # Periodic log entry + state persistence.
