@@ -126,17 +126,7 @@ function Get-Device {
 function Detect-Profile {
     if ($Command -ne "auto") { return $Command }
 
-    $candidates = @(
-        @("flashing","unlock"),
-        @("oem","unlock")
-    )
-    foreach ($c in $candidates) {
-        $out = Invoke-Fastboot $c
-        if ($out -notmatch "(FAILED|error|waiting|HANG)") {
-            return ($c[0] + "-" + $c[1])
-        }
-    }
-    throw "Unable to autodetect a supported unlock command."
+    return "flashing-unlock"
 }
 
 # --------------------------------------------------
@@ -186,6 +176,9 @@ function Expand-Pattern {
 # 7️⃣  Core unlock routine (runs once)
 # --------------------------------------------------
 function Run-Unlock {
+    $fastbootFailurePattern = "(FAILED|error|waiting|HANG)"
+    $unsupportedCommandPattern = "(?i)((unknown|invalid|unrecognized) command|not found|usage:)"
+
     $device = Get-Device
     if (-not $device) {
         Write-Log "❌ No fastboot device detected – connect the phone in bootloader mode."
@@ -200,12 +193,21 @@ function Run-Unlock {
         "flashing-unlock"{
             $out = Invoke-Fastboot @("flashing","unlock")
             Write-Log $out
-            return $out -notmatch "(FAILED|error|waiting|HANG)"
+            if ($out -match $unsupportedCommandPattern) {
+                Write-Log "ℹ️ 'fastboot flashing unlock' is unsupported; retrying with 'fastboot oem unlock'."
+                $out = Invoke-Fastboot @("oem","unlock")
+                Write-Log $out
+                if ($out -match $unsupportedCommandPattern) {
+                    Write-Log "❌ 'fastboot oem unlock' is also unsupported on this device."
+                    return $false
+                }
+            }
+            return $out -notmatch $fastbootFailurePattern
         }
         "oem-unlock"{
             $out = Invoke-Fastboot @("oem","unlock")
             Write-Log $out
-            return $out -notmatch "(FAILED|error|waiting|HANG)"
+            return $out -notmatch $fastbootFailurePattern
         }
         "flashing-unlock-code"{
             foreach($pat in $Patterns){
@@ -213,7 +215,7 @@ function Run-Unlock {
                 foreach($code in $cands){
                     $out = Invoke-Fastboot @("flashing","unlock",$code)
                     Write-Log "Trying $code → $out"
-                    if($out -notmatch "(FAILED|error|waiting|HANG)"){
+                    if($out -notmatch $fastbootFailurePattern){
                         Write-Log "✅ SUCCESS – unlock code: $code"
                         return $true
                     }
@@ -227,7 +229,7 @@ function Run-Unlock {
                 foreach($code in $cands){
                     $out = Invoke-Fastboot @("oem","unlock",$code)
                     Write-Log "Trying $code → $out"
-                    if($out -notmatch "(FAILED|error|waiting|HANG)"){
+                    if($out -notmatch $fastbootFailurePattern){
                         Write-Log "✅ SUCCESS – unlock code: $code"
                         return $true
                     }
