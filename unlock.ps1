@@ -526,6 +526,37 @@ function Invoke-UnlockCommand {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 13.5  POST-UNLOCK HINT  (GrapheneOS install pointer; opt-in browser hand-off)
+# ─────────────────────────────────────────────────────────────────────────────
+function Write-GrapheneOSInstallHint {
+    param([string]$Serial)
+    $product = Invoke-Fastboot -Arguments @("getvar", "product") -Serial $Serial
+    $codename = if ($product -match '(?i)product:\s*(\S+)') { $Matches[1] } else { "" }
+
+    $releasesUrl = "https://grapheneos.org/releases"
+    $installUrl  = "https://grapheneos.org/install/cli"
+
+    Write-Log "------------------------------------------------------------"
+    Write-Log "Bootloader unlocked. To install GrapheneOS:"
+    if ($codename) { Write-Log "  Device codename (reported): $codename" }
+    Write-Log "  1. Check device support and get the factory image: $releasesUrl"
+    Write-Log "  2. Follow the official CLI install instructions:  $installUrl"
+    Write-Log "  (This script does not download, verify, or flash a factory image itself --"
+    Write-Log "   the official install page handles checksum/signature verification, which"
+    Write-Log "   matters a lot for a security-focused OS like this.)"
+
+    $resp = Read-Host "Open the official GrapheneOS install page in your browser now? [y/N]"
+    if ($resp -match '^[Yy]') {
+        try {
+            Start-Process $installUrl
+            Write-Log "[OK] Opened $installUrl in default browser."
+        } catch {
+            Write-Log "[WARN] Could not open browser automatically: $($_.Exception.Message)"
+        }
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 14  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -572,6 +603,7 @@ if (Test-Path $script:SuccessFile) {
     $prev = (Get-Content $script:SuccessFile -Raw).Trim()
     Write-Log "[OK] This device was already unlocked. Code: $prev"
     Write-Log "     Delete $($script:SuccessFile) to re-run."
+    Write-GrapheneOSInstallHint -Serial $selectedSerial
     exit 0
 }
 
@@ -594,6 +626,7 @@ if (-not (Test-ProfileNeedsCode $resolvedProfile)) {
         Write-Log "[OK] Command sent. Confirm unlock on device screen if prompted."
         Set-Content -Path $script:SuccessFile -Value "(no-code unlock sent)" -Encoding UTF8
         Save-StateFile
+        Write-GrapheneOSInstallHint -Serial $selectedSerial
         exit 0
     }
 
@@ -706,6 +739,7 @@ try {
             Write-Log "[OK] SUCCESS -- unlock code: $code"
             Set-Content -Path $script:SuccessFile -Value $code -Encoding UTF8
             Write-Log "[OK] Saved to $($script:SuccessFile)"
+            Write-GrapheneOSInstallHint -Serial $selectedSerial
             break
         }
 
