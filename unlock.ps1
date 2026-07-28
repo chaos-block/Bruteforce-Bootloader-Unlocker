@@ -526,19 +526,34 @@ function Invoke-UnlockCommand {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13.5  POST-UNLOCK HINT  (GrapheneOS install pointer, informational only)
+# 13.5  POST-UNLOCK HINT  (GrapheneOS install pointer; opt-in browser hand-off)
 # ─────────────────────────────────────────────────────────────────────────────
 function Write-GrapheneOSInstallHint {
     param([string]$Serial)
     $product = Invoke-Fastboot -Arguments @("getvar", "product") -Serial $Serial
     $codename = if ($product -match '(?i)product:\s*(\S+)') { $Matches[1] } else { "" }
 
+    $releasesUrl = "https://grapheneos.org/releases"
+    $installUrl  = "https://grapheneos.org/install/cli"
+
     Write-Log "------------------------------------------------------------"
     Write-Log "Bootloader unlocked. To install GrapheneOS:"
     if ($codename) { Write-Log "  Device codename (reported): $codename" }
-    Write-Log "  1. Check device support and get the factory image: https://grapheneos.org/releases"
-    Write-Log "  2. Follow the official CLI install instructions:  https://grapheneos.org/install/cli"
-    Write-Log "  (This script does not download or flash anything automatically.)"
+    Write-Log "  1. Check device support and get the factory image: $releasesUrl"
+    Write-Log "  2. Follow the official CLI install instructions:  $installUrl"
+    Write-Log "  (This script does not download, verify, or flash a factory image itself --"
+    Write-Log "   the official install page handles checksum/signature verification, which"
+    Write-Log "   matters a lot for a security-focused OS like this.)"
+
+    $resp = Read-Host "Open the official GrapheneOS install page in your browser now? [y/N]"
+    if ($resp -match '^[Yy]') {
+        try {
+            Start-Process $installUrl
+            Write-Log "[OK] Opened $installUrl in default browser."
+        } catch {
+            Write-Log "[WARN] Could not open browser automatically: $($_.Exception.Message)"
+        }
+    }
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
