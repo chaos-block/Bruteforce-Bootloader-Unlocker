@@ -526,6 +526,22 @@ function Invoke-UnlockCommand {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 13.5  POST-UNLOCK HINT  (GrapheneOS install pointer, informational only)
+# ─────────────────────────────────────────────────────────────────────────────
+function Write-GrapheneOSInstallHint {
+    param([string]$Serial)
+    $product = Invoke-Fastboot -Arguments @("getvar", "product") -Serial $Serial
+    $codename = if ($product -match '(?i)product:\s*(\S+)') { $Matches[1] } else { "" }
+
+    Write-Log "------------------------------------------------------------"
+    Write-Log "Bootloader unlocked. To install GrapheneOS:"
+    if ($codename) { Write-Log "  Device codename (reported): $codename" }
+    Write-Log "  1. Check device support and get the factory image: https://grapheneos.org/releases"
+    Write-Log "  2. Follow the official CLI install instructions:  https://grapheneos.org/install/cli"
+    Write-Log "  (This script does not download or flash anything automatically.)"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 14  MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -572,6 +588,7 @@ if (Test-Path $script:SuccessFile) {
     $prev = (Get-Content $script:SuccessFile -Raw).Trim()
     Write-Log "[OK] This device was already unlocked. Code: $prev"
     Write-Log "     Delete $($script:SuccessFile) to re-run."
+    Write-GrapheneOSInstallHint -Serial $selectedSerial
     exit 0
 }
 
@@ -594,6 +611,7 @@ if (-not (Test-ProfileNeedsCode $resolvedProfile)) {
         Write-Log "[OK] Command sent. Confirm unlock on device screen if prompted."
         Set-Content -Path $script:SuccessFile -Value "(no-code unlock sent)" -Encoding UTF8
         Save-StateFile
+        Write-GrapheneOSInstallHint -Serial $selectedSerial
         exit 0
     }
 
@@ -706,6 +724,7 @@ try {
             Write-Log "[OK] SUCCESS -- unlock code: $code"
             Set-Content -Path $script:SuccessFile -Value $code -Encoding UTF8
             Write-Log "[OK] Saved to $($script:SuccessFile)"
+            Write-GrapheneOSInstallHint -Serial $selectedSerial
             break
         }
 
