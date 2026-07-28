@@ -97,7 +97,7 @@ $script:FastbootBin = Get-FastbootPath
 Write-Host "[OK] fastboot: $($script:FastbootBin)"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3  FASTBOOT WRAPPER  (hang detection, GUID temp files)
+# 3  FASTBOOT WRAPPER  (hang detection via WaitForExit, in-memory async capture)
 # ─────────────────────────────────────────────────────────────────────────────
 function Invoke-Fastboot {
     param(
@@ -107,32 +107,35 @@ function Invoke-Fastboot {
     # Prepend -s <serial> when targeting a specific device.
     $allArgs = if ($Serial) { @("-s", $Serial) + $Arguments } else { $Arguments }
 
-    $tmpOut = Join-Path $env:TEMP ("fb_out_{0}.tmp" -f [guid]::NewGuid())
-    $tmpErr = Join-Path $env:TEMP ("fb_err_{0}.tmp" -f [guid]::NewGuid())
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName              = $script:FastbootBin
+    $psi.WorkingDirectory       = Split-Path -Parent $script:FastbootBin
+    $psi.UseShellExecute        = $false
+    $psi.CreateNoWindow         = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    foreach ($a in $allArgs) { $psi.ArgumentList.Add($a) }
 
-    $proc = Start-Process -FilePath $script:FastbootBin `
-                          -ArgumentList $allArgs `
-                          -WorkingDirectory (Split-Path -Parent $script:FastbootBin) `
-                          -NoNewWindow `
-                          -RedirectStandardOutput $tmpOut `
-                          -RedirectStandardError  $tmpErr `
-                          -PassThru
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
 
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    while (-not $proc.HasExited) {
-        if ($sw.Elapsed.TotalSeconds -gt $HangTimeout) {
-            Write-Host "  [WARN] fastboot '$($Arguments -join ' ')' hung (> $HangTimeout s). Killing."
-            $proc | Stop-Process -Force -ErrorAction SilentlyContinue
-            Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
-            return "HANG"
-        }
-        Start-Sleep -Milliseconds 200
+    # Drain both streams asynchronously (no temp files) — reading them
+    # concurrently, rather than sequentially after exit, avoids the classic
+    # redirect deadlock where the child blocks on a full pipe.
+    $outTask = $proc.StandardOutput.ReadToEndAsync()
+    $errTask = $proc.StandardError.ReadToEndAsync()
+
+    # WaitForExit blocks efficiently at the OS level and returns the instant
+    # the process exits, instead of the old 200ms poll loop's built-in lag.
+    if (-not $proc.WaitForExit($HangTimeout * 1000)) {
+        Write-Host "  [WARN] fastboot '$($Arguments -join ' ')' hung (> $HangTimeout s). Killing."
+        try { $proc.Kill() } catch {}
+        return "HANG"
     }
 
-    $out = if (Test-Path $tmpOut) { Get-Content $tmpOut -Raw } else { "" }
-    $err = if (Test-Path $tmpErr) { Get-Content $tmpErr -Raw } else { "" }
-    Remove-Item $tmpOut, $tmpErr -ErrorAction SilentlyContinue
-    return ($out + $err).TrimEnd()
+    [System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), 2000) | Out-Null
+    return ($outTask.Result + $errTask.Result).TrimEnd()
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
