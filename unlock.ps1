@@ -526,6 +526,42 @@ function Invoke-UnlockCommand {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 13.4  UNLOCK VERIFICATION  (reapply + confirm via 'getvar unlocked')
+# ─────────────────────────────────────────────────────────────────────────────
+function Get-UnlockedState {
+    # Returns 'yes', 'no', or 'unknown' (device doesn't expose the var).
+    param([string]$Serial)
+    $out = Invoke-Fastboot -Arguments @("getvar", "unlocked") -Serial $Serial
+    if ($out -match '(?i)unlocked:\s*yes') { return "yes" }
+    if ($out -match '(?i)unlocked:\s*no')  { return "no" }
+    return "unknown"
+}
+
+function Confirm-Unlock {
+    # A non-failure fastboot response is a weak signal on its own. Reapply the
+    # same unlock command once more, then check the device's own state var
+    # rather than just trusting the absence of a failure string.
+    param([string]$Profile, [string]$Serial, [string]$Code = "")
+
+    Write-Log "Reapplying unlock command to confirm..."
+    $reapply = Invoke-UnlockCommand -Profile $Profile -Serial $Serial -Code $Code
+    Write-Log $reapply
+    if (Test-TerminalError $reapply) {
+        Write-Log "[WARN] Reapply hit a terminal error; not confirmed."
+        return "no"
+    }
+
+    Start-Sleep -Milliseconds 1000
+    $state = Get-UnlockedState -Serial $Serial
+    switch ($state) {
+        "yes"     { Write-Log "[OK] CONFIRMED: 'fastboot getvar unlocked' reports yes." }
+        "no"      { Write-Log "[WARN] NOT confirmed: device still reports unlocked=no. It may need on-device confirmation (volume/power) before it takes effect." }
+        "unknown" { Write-Log "[WARN] Device does not expose 'unlocked' getvar; cannot auto-verify. Check the device screen manually." }
+    }
+    return $state
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 13.5  POST-UNLOCK HINT  (GrapheneOS install pointer; opt-in browser hand-off)
 # ─────────────────────────────────────────────────────────────────────────────
 function Write-GrapheneOSInstallHint {
@@ -623,6 +659,13 @@ if (-not (Test-ProfileNeedsCode $resolvedProfile)) {
     }
 
     if (-not (Test-FastbootFailure $out)) {
+        $state = Confirm-Unlock -Profile $resolvedProfile -Serial $selectedSerial
+        if ($state -eq "no") {
+            Write-Log "[ERR] Command sent but device is not confirmed unlocked yet."
+            Write-Log "      If prompted, confirm on the device screen (volume/power), then re-run this script to verify."
+            Save-StateFile
+            exit 1
+        }
         Write-Log "[OK] Command sent. Confirm unlock on device screen if prompted."
         Set-Content -Path $script:SuccessFile -Value "(no-code unlock sent)" -Encoding UTF8
         Save-StateFile
@@ -736,6 +779,13 @@ try {
         # Success: no failure indicators in the output.
         if (-not (Test-FastbootFailure $out)) {
             Write-Host ""
+            $state = Confirm-Unlock -Profile $resolvedProfile -Serial $selectedSerial -Code $code
+            if ($state -eq "no") {
+                Write-Log "[WARN] Code '$code' looked promising but was not confirmed unlocked. Treating as a false positive and continuing."
+                $offsets[$idx]++
+                $cursor++
+                continue
+            }
             Write-Log "[OK] SUCCESS -- unlock code: $code"
             Set-Content -Path $script:SuccessFile -Value $code -Encoding UTF8
             Write-Log "[OK] Saved to $($script:SuccessFile)"
