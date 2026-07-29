@@ -268,8 +268,17 @@ function Resolve-CommandProfile {
 
     # Heuristic 2: OEM unlock-data response (Motorola / token-issuing devices).
     $unlockData = Invoke-Fastboot -Arguments @("oem", "get_unlock_data") -Serial $Serial
+
+    # AOSP/Pixel bootloaders don't implement any 'oem' subcommand at all and
+    # reject it outright -- that rejection is itself strong evidence this is
+    # a flashing-unlock device, not weak evidence to fall through on.
+    if ($unlockData -match '(?i)(unknown.?command|not.?supported|invalid.?oem.?command|no.?such.?command)') {
+        Write-Log "[OK] Device rejects 'oem' subcommands (AOSP-style bootloader) -> flashing-unlock"
+        return "flashing-unlock"
+    }
+
     if (($unlockData -match '(?i)(unlock.?data|bootloader|INFO|Motorola|token)') -and
-        ($unlockData -notmatch '(?i)(unknown.?command|not.?supported|FAILED|remote failure)')) {
+        ($unlockData -notmatch '(?i)(FAILED|remote failure)')) {
         Write-Log "[OK] OEM unlock-data responded with token data -> oem-unlock-code"
         return "oem-unlock-code"
     }
@@ -634,13 +643,25 @@ $resolvedProfile = if ($Command -ne "auto") {
 $script:State["resolved_command"] = $resolvedProfile
 Write-Log "Profile:  $resolvedProfile"
 
-# --- Already succeeded? ---
+# --- Already succeeded? Verify against the live device before trusting it. ---
 if (Test-Path $script:SuccessFile) {
     $prev = (Get-Content $script:SuccessFile -Raw).Trim()
-    Write-Log "[OK] This device was already unlocked. Code: $prev"
-    Write-Log "     Delete $($script:SuccessFile) to re-run."
-    Write-GrapheneOSInstallHint -Serial $selectedSerial
-    exit 0
+    Write-Log "Success file exists (code: $prev). Verifying against live device state..."
+    $state = Get-UnlockedState -Serial $selectedSerial
+    if ($state -eq "yes") {
+        Write-Log "[OK] CONFIRMED: device reports unlocked. Code: $prev"
+        Write-Log "     Delete $($script:SuccessFile) to re-run."
+        Write-GrapheneOSInstallHint -Serial $selectedSerial
+        exit 0
+    } elseif ($state -eq "no") {
+        Write-Log "[WARN] Success file exists but the device reports unlocked=no -- stale or incorrect record."
+        Write-Log "       Ignoring $($script:SuccessFile) and continuing."
+    } else {
+        Write-Log "[WARN] Device does not expose 'unlocked' getvar; cannot verify the saved success file."
+        Write-Log "       Trusting it (delete $($script:SuccessFile) to force a re-run)."
+        Write-GrapheneOSInstallHint -Serial $selectedSerial
+        exit 0
+    }
 }
 
 # ── NO-CODE PROFILE: run once and classify result ─────────────────────────────
